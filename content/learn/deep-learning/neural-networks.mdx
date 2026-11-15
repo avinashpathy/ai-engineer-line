@@ -1,0 +1,177 @@
+---
+summary: What a neuron computes, how layers stack into a network, how backpropagation assigns blame with the chain rule (worked by hand), and a working network built from scratch in NumPy.
+---
+
+## From one formula to a network
+
+<Level l="beginner" />
+
+In [How models learn](/learn/ml-essentials/how-models-learn/) the model was a single weighted sum: `y = w·x + b`. That can only draw straight lines. Real problems — recognising a face, understanding a sentence — need curves, corners and combinations. A **neural network** gets them by stacking many simple units, each adding a little non-linearity.
+
+## The neuron
+
+<Level l="beginner" />
+
+An artificial **neuron** does two things:
+
+1. **Weighted sum:** multiply each input by its weight, add them up, add a bias. `z = w₁x₁ + w₂x₂ + … + b`
+2. **Activation:** pass `z` through a non-linear function. `a = f(z)`
+
+<Analogy>
+A neuron is a tiny voter. Each input is a piece of evidence; the weights say how much it trusts each piece (negative weights are evidence *against*); the bias is its prior lean; the activation decides how strongly it speaks up. A network is a committee of committees.
+</Analogy>
+
+### Activation functions
+
+Without the activation, stacking layers would be pointless: many linear layers collapse into one linear layer. The activation is what lets networks bend.
+
+| Function | Formula | Output range | Where it's used |
+|---|---|---|---|
+| ReLU | `max(0, z)` | 0 to ∞ | Default for hidden layers: fast and simple |
+| GELU | Smooth version of ReLU | ≈ −0.17 to ∞ | Transformers (BERT, GPT) |
+| Sigmoid | `1 / (1 + e^−z)` | 0 to 1 | Output for yes/no probability |
+| Tanh | `(e^z − e^−z) / (e^z + e^−z)` | −1 to 1 | Older RNNs |
+| Softmax | `e^zᵢ / Σ e^zⱼ` | 0 to 1, sums to 1 | Output for choosing one of many classes (or the next token) |
+
+## Layers
+
+<Level l="beginner" />
+
+Neurons are arranged in **layers**. Every neuron in one layer feeds every neuron in the next (a "fully connected" or "dense" layer). Layers between input and output are **hidden layers**; "deep" learning just means many of them.
+
+<NeuralNet caption="A small network: 3 input features, two hidden layers of 4 neurons, 2 outputs. It has 3×4 + 4×4 + 4×2 = 36 weights plus 10 biases, 46 parameters in all. GPT-class models have billions, but every one is learned the same way." />
+
+Early layers learn simple patterns (edges in an image, common word pairs in text). Later layers combine them into complex ones (faces, meanings). Nobody programs these features; they emerge from training.
+
+## The forward pass, by hand
+
+<Level l="intermediate" />
+
+<Example title="Worked example: a forward pass">
+A tiny network: 2 inputs → 2 hidden neurons (ReLU) → 1 output (sigmoid). Input **x = [1, 2]**.
+
+**Hidden neuron 1:** weights [0.5, −0.2], bias 0.1
+z = 0.5×1 + (−0.2)×2 + 0.1 = **0.2** → ReLU → **0.2**
+
+**Hidden neuron 2:** weights [−0.3, 0.8], bias 0
+z = −0.3×1 + 0.8×2 + 0 = **1.3** → ReLU → **1.3**
+
+**Output:** weights [1.0, 0.5], bias −0.5
+z = 1.0×0.2 + 0.5×1.3 − 0.5 = **0.35** → sigmoid → 1 / (1 + e^−0.35) ≈ **0.587**
+
+The network says "58.7% likely yes". In matrix form the whole layer is one line: `a = relu(W @ x + b)`. That's why GPUs, which are very fast at matrix multiplication, made deep learning practical.
+</Example>
+
+## Loss for classification: cross-entropy
+
+<Level l="intermediate" />
+
+For yes/no or multi-class outputs, the standard loss is **cross-entropy**: `−log(probability given to the correct answer)`.
+
+| Probability on the right answer | Loss |
+|---|---|
+| 0.99 | 0.01 |
+| 0.60 | 0.51 |
+| 0.10 | 2.30 |
+| 0.01 | 4.61 |
+
+Confidently wrong answers are punished hard. LLM pre-training uses exactly this loss: the "correct answer" is the actual next token.
+
+## Backpropagation: assigning blame
+
+<Level l="intermediate" />
+
+Training needs the gradient of the loss with respect to *every* weight. **Backpropagation** computes them all efficiently by working backwards from the loss, layer by layer, using the **chain rule**: if the loss depends on `a`, which depends on `z`, which depends on `w`, then
+
+```
+∂Loss/∂w = ∂Loss/∂a × ∂a/∂z × ∂z/∂w
+```
+
+Each layer only needs the gradient handed back from the layer after it, multiplied by its own local slope.
+
+<Example title="Worked example: one gradient, by hand">
+Continue the forward pass above. The true label is **y = 1**, and the output was ŷ = 0.587. For sigmoid with cross-entropy, the gradient at the output's z simplifies neatly to **ŷ − y = 0.587 − 1 = −0.413**.
+
+How should the output weight on hidden neuron 2 (currently 0.5) change?
+
+- ∂z/∂w = the input to that weight = hidden neuron 2's output = **1.3**
+- ∂Loss/∂w = −0.413 × 1.3 = **−0.537**
+
+With learning rate 0.1: w ← 0.5 − 0.1 × (−0.537) = **0.554**. The weight grows because hidden neuron 2 was pushing toward the right answer.
+
+Going one layer further back, hidden neuron 2 receives the blame signal −0.413 × 0.5 (its output weight) = **−0.207**, and passes it on to its own input weights the same way. That's backpropagation.
+</Example>
+
+Frameworks like PyTorch do all of this automatically (**autograd**), but knowing what happens explains most training problems you'll meet.
+
+## A network from scratch in NumPy
+
+<Level l="advanced" />
+
+**XOR** is the classic problem a single straight line can't solve: the output is 1 when exactly one input is 1. A network with one hidden layer learns it.
+
+```python title="xor_numpy.py"
+import numpy as np
+
+rng = np.random.default_rng(42)
+X = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=float)
+y = np.array([[0], [1], [1], [0]], dtype=float)
+
+W1, b1 = rng.normal(0, 1, (2, 8)), np.zeros((1, 8))      # 2 inputs → 8 hidden
+W2, b2 = rng.normal(0, 1, (8, 1)), np.zeros((1, 1))      # 8 hidden → 1 output
+sigmoid = lambda z: 1 / (1 + np.exp(-z))
+lr = 0.5
+
+for epoch in range(5000):
+    # forward pass
+    z1 = X @ W1 + b1;  a1 = np.tanh(z1)
+    z2 = a1 @ W2 + b2; y_hat = sigmoid(z2)
+    loss = -np.mean(y * np.log(y_hat + 1e-9) + (1 - y) * np.log(1 - y_hat + 1e-9))
+
+    # backward pass (chain rule, layer by layer)
+    dz2 = (y_hat - y) / len(X)              # sigmoid + cross-entropy shortcut
+    dW2, db2 = a1.T @ dz2, dz2.sum(0, keepdims=True)
+    dz1 = (dz2 @ W2.T) * (1 - a1 ** 2)      # tanh'(z) = 1 − tanh²(z)
+    dW1, db1 = X.T @ dz1, dz1.sum(0, keepdims=True)
+
+    # gradient descent step
+    W1 -= lr * dW1; b1 -= lr * db1; W2 -= lr * dW2; b2 -= lr * db2
+    if epoch % 1000 == 0:
+        print(f"epoch {epoch:4d}  loss {loss:.4f}")
+
+print(np.round(y_hat.ravel(), 3))           # close to [0, 1, 1, 0]
+```
+
+Every deep-learning framework is, at its core, this loop with automatic gradients, GPU support and many conveniences on top.
+
+## Why deep networks were hard, and what fixed it
+
+<Level l="advanced" />
+
+| Problem | What happens | Fix you'll see in modern models |
+|---|---|---|
+| Vanishing gradients | Blame shrinks layer by layer until early layers stop learning | ReLU/GELU activations, residual connections, normalisation |
+| Exploding gradients | Blame grows until weights become `nan` | Gradient clipping, careful initialisation, lower learning rate |
+| Overfitting | Millions of parameters memorise the data | More data, dropout, weight decay, early stopping |
+| Slow training | Billions of multiply-adds | GPUs, mixed precision, efficient batching |
+
+**Residual connections** (`x + layer(x)`) and **layer normalisation** are exactly what you'll see inside every [Transformer block](/learn/transformers/attention-and-transformer/).
+
+<Interview>
+<QA q="Why do neural networks need non-linear activation functions?">
+Without them, any stack of linear layers is equivalent to a single linear layer, so depth adds nothing. Non-linear activations let the network represent curved, complex decision boundaries.
+</QA>
+<QA q="Explain backpropagation in two sentences.">
+After a forward pass computes the loss, backpropagation applies the chain rule from the output back to the input, giving the gradient of the loss with respect to every weight. Gradient descent then nudges each weight against its gradient.
+</QA>
+<QA q="What is the vanishing gradient problem?">
+In deep networks, gradients are products of many small terms, so they can shrink toward zero in early layers, which then barely learn. ReLU-family activations, residual connections and normalisation largely solve it.
+</QA>
+</Interview>
+
+<Takeaways>
+- A neuron is a weighted sum plus a non-linear activation; layers of neurons stack into a network.
+- The forward pass makes a prediction; cross-entropy measures how wrong it is.
+- Backpropagation uses the chain rule to give every weight its share of the blame; gradient descent updates them.
+- Residual connections, normalisation and good activations are what make very deep networks — and Transformers — trainable.
+</Takeaways>

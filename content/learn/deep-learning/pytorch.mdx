@@ -1,0 +1,274 @@
+---
+summary: PyTorch in practice — tensors, autograd, nn.Module, DataLoaders, a training loop you can reuse for any model, saving and loading, transfer learning, and the bugs everyone hits.
+---
+
+## Why PyTorch
+
+<Level l="intermediate" />
+
+PyTorch is the framework nearly all modern models are written in, including the open-weight LLMs you'll fine-tune and the Hugging Face libraries built on top. You don't need to be a PyTorch expert to be an AI Engineer, but you must be able to read a model definition, run a training loop, and debug the common errors.
+
+```bash
+pip install torch torchvision      # see pytorch.org for the right command for your GPU
+```
+
+## Tensors
+
+<Level l="intermediate" />
+
+A **tensor** is a multi-dimensional array, like a NumPy array, that can live on a GPU and track gradients.
+
+```python title="tensors.py"
+import torch
+
+x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+print(x.shape, x.dtype)                  # torch.Size([2, 2]) torch.float32
+
+zeros = torch.zeros(3, 4)
+rand = torch.randn(32, 128)              # e.g. a batch of 32 vectors of size 128
+y = rand @ torch.randn(128, 10)          # matrix multiply → shape (32, 10)
+
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+y = y.to(device)                         # move to the GPU if there is one
+print(y.shape, y.device)
+```
+
+<Tip title="Think in shapes">
+Most PyTorch bugs are shape bugs. Print `.shape` constantly. Common conventions: images are `(batch, channels, height, width)`; text is `(batch, sequence_length)` of token IDs, which becomes `(batch, sequence_length, embedding_dim)` after the embedding layer.
+</Tip>
+
+## Autograd: gradients for free
+
+<Level l="intermediate" />
+
+Mark a tensor with `requires_grad=True`, compute something, call `.backward()`, and PyTorch fills in `.grad` using the same chain rule you worked through by hand in [Neural networks](/learn/deep-learning/neural-networks/).
+
+```python title="autograd.py"
+import torch
+
+w = torch.tensor(1.0, requires_grad=True)
+x, y = torch.tensor(2.0), torch.tensor(6.0)
+
+loss = (w * x - y) ** 2       # the gradient-descent example from "How models learn"
+loss.backward()
+print(w.grad)                 # tensor(-16.) — matches the hand calculation
+```
+
+## Defining a model with `nn.Module`
+
+<Level l="intermediate" />
+
+Every PyTorch model is a class that inherits from `nn.Module`: layers are created in `__init__`, and the computation is written in `forward`.
+
+```python title="model.py"
+import torch.nn as nn
+
+class Classifier(nn.Module):
+    def __init__(self, in_features: int = 784, hidden: int = 256, n_classes: int = 10, dropout: float = 0.2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),                       # (B, 1, 28, 28) → (B, 784)
+            nn.Linear(in_features, hidden), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden, n_classes),       # raw scores ("logits"), no softmax here
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = Classifier()
+print(sum(p.numel() for p in model.parameters()), "parameters")   # 269,322
+```
+
+<Note title="Why no softmax at the end?">
+`nn.CrossEntropyLoss` applies log-softmax internally in a numerically stable way, so the model should output raw logits. Apply `softmax` only when you need probabilities for display.
+</Note>
+
+## Data: `Dataset` and `DataLoader`
+
+<Level l="intermediate" />
+
+A `Dataset` knows how to return one example; a `DataLoader` batches, shuffles and loads them in parallel.
+
+```python title="data.py"
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms
+
+tfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+full_train = datasets.FashionMNIST("data", train=True, download=True, transform=tfm)
+test_set = datasets.FashionMNIST("data", train=False, download=True, transform=tfm)
+train_set, val_set = random_split(full_train, [54_000, 6_000])
+
+train_dl = DataLoader(train_set, batch_size=128, shuffle=True, num_workers=2)
+val_dl = DataLoader(val_set, batch_size=256)
+test_dl = DataLoader(test_set, batch_size=256)
+```
+
+For your own data, write a small class with `__len__` and `__getitem__`:
+
+```python title="custom_dataset.py"
+from torch.utils.data import Dataset
+import torch
+
+class TicketDataset(Dataset):
+    def __init__(self, token_ids: list[list[int]], labels: list[int]):
+        self.x, self.y = token_ids, labels
+    def __len__(self):
+        return len(self.y)
+    def __getitem__(self, i):
+        return torch.tensor(self.x[i]), torch.tensor(self.y[i])
+```
+
+## The training loop
+
+<Level l="intermediate" />
+
+This loop — or a library that wraps it, like the Hugging Face `Trainer` — trains everything from this classifier to an LLM fine-tune.
+
+```mermaid caption="One training step. The validation loop is the same forward pass with gradients switched off and no update."
+flowchart TD
+  A[Get a batch<br/>from DataLoader] --> B[Move to device]
+  B --> C[Forward pass<br/>logits = model x]
+  C --> D[Loss<br/>compare with labels]
+  D --> E[optimizer.zero_grad]
+  E --> F[loss.backward<br/>autograd computes gradients]
+  F --> G[optimizer.step<br/>update weights]
+  G --> A
+```
+
+```python title="train.py"
+import torch, torch.nn as nn
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = Classifier().to(device)
+loss_fn = nn.CrossEntropyLoss()
+opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
+
+def run_epoch(loader, train: bool):
+    model.train(train)                                  # enables/disables dropout
+    total_loss, correct, n = 0.0, 0, 0
+    with torch.set_grad_enabled(train):
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            logits = model(x)
+            loss = loss_fn(logits, y)
+            if train:
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+            total_loss += loss.item() * len(y)
+            correct += (logits.argmax(1) == y).sum().item()
+            n += len(y)
+    return total_loss / n, correct / n
+
+best_val, patience, bad_epochs = float("inf"), 3, 0
+for epoch in range(30):
+    tr_loss, tr_acc = run_epoch(train_dl, train=True)
+    va_loss, va_acc = run_epoch(val_dl, train=False)
+    print(f"epoch {epoch:2d}  train {tr_loss:.3f}/{tr_acc:.3f}  val {va_loss:.3f}/{va_acc:.3f}")
+    if va_loss < best_val:
+        best_val, bad_epochs = va_loss, 0
+        torch.save(model.state_dict(), "best.pt")     # keep the best checkpoint
+    else:
+        bad_epochs += 1
+        if bad_epochs >= patience:                     # early stopping
+            print("stopping early"); break
+
+model.load_state_dict(torch.load("best.pt", map_location=device))
+print("test accuracy:", run_epoch(test_dl, train=False)[1])   # about 0.89
+```
+
+Look for the ideas from earlier lessons: validation-based **early stopping** ([How models learn](/learn/ml-essentials/how-models-learn/)), **dropout** and **weight decay** against overfitting, **gradient clipping** against exploding gradients, and a test set touched exactly once.
+
+## Saving, loading and inference
+
+<Level l="intermediate" />
+
+```python title="inference.py"
+import torch
+
+model = Classifier()
+model.load_state_dict(torch.load("best.pt", map_location="cpu", weights_only=True))
+model.eval()                                   # switch off dropout
+with torch.inference_mode():                   # no gradient tracking: faster, less memory
+    probs = torch.softmax(model(batch), dim=-1)
+    top_p, top_class = probs.max(dim=-1)
+```
+
+Save the `state_dict` (just the weights), not the whole model object, and load with `weights_only=True`. Loading arbitrary pickled checkpoints from the internet can execute code; prefer the `safetensors` format for models you download or share.
+
+## Transfer learning
+
+<Level l="advanced" />
+
+Training from scratch needs lots of data and compute. **Transfer learning** starts from a model already trained on a huge dataset and adapts it to your task. It's the same idea as fine-tuning LLMs.
+
+```python title="transfer.py"
+import torch.nn as nn
+from torchvision import models
+
+backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)   # pre-trained on ImageNet
+for p in backbone.parameters():
+    p.requires_grad = False                                          # freeze what it already knows
+backbone.fc = nn.Linear(backbone.fc.in_features, 5)                  # new head for your 5 classes
+# train only backbone.fc for a few epochs; optionally unfreeze later layers with a small learning rate
+```
+
+With a few hundred labelled images per class, this typically beats a model trained from scratch on millions of steps. The [fine-tuning station](/learn/fine-tuning/) applies the same idea to LLMs with LoRA.
+
+## Faster training on a GPU
+
+<Level l="advanced" />
+
+**Mixed precision** runs most maths in 16-bit floats: roughly twice as fast, with half the memory, and usually no loss in accuracy.
+
+```python title="amp.py"
+use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+dtype = torch.bfloat16 if use_bf16 else torch.float16
+scaler = torch.amp.GradScaler(enabled=(dtype == torch.float16))   # bf16 doesn't need scaling
+
+for x, y in train_dl:
+    x, y = x.to(device), y.to(device)
+    with torch.autocast(device_type="cuda", dtype=dtype):
+        loss = loss_fn(model(x), y)
+    opt.zero_grad(set_to_none=True)
+    scaler.scale(loss).backward()
+    scaler.step(opt); scaler.update()
+```
+
+## The bugs everyone hits
+
+<Level l="intermediate" />
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `RuntimeError: mat1 and mat2 shapes cannot be multiplied` | Layer sizes don't match the data | Print shapes at each step; check `in_features` |
+| `Expected all tensors to be on the same device` | Model on GPU, data on CPU (or the reverse) | `.to(device)` on both model and every batch |
+| Loss doesn't go down | Learning rate too high or low; forgot `zero_grad`; labels wrong | Try 1e-3 then 1e-4; overfit a single batch first as a sanity check |
+| Loss becomes `nan` | Learning rate too high; exploding gradients; `log(0)` | Lower the learning rate; clip gradients; add epsilon |
+| Validation accuracy oddly low, or changes run to run | Forgot `model.eval()` (dropout still on) | `model.eval()` and `torch.inference_mode()` for evaluation |
+| CUDA out of memory | Batch too big, or keeping tensors with gradients | Smaller batch, mixed precision, use `loss.item()` when logging |
+
+<Tip title="The single best debugging trick">
+Before a full run, try to **overfit one small batch**: train on the same 32 examples for 200 steps. Loss should drop to nearly zero. If it can't, there's a bug in the model, loss or data, not a tuning problem.
+</Tip>
+
+<Interview>
+<QA q="What does model.eval() do, and why does it matter?">
+It switches layers like dropout and batch normalisation into inference behaviour. Forgetting it gives noisy, lower validation scores and inconsistent predictions. It does not turn off gradients; use `torch.no_grad()` or `torch.inference_mode()` for that.
+</QA>
+<QA q="Why call optimizer.zero_grad() every step?">
+PyTorch accumulates gradients into `.grad` by default. Without zeroing, each step uses the sum of all previous gradients and training goes wrong.
+</QA>
+<QA q="What is transfer learning and why is it so effective?">
+Starting from a model pre-trained on a large dataset and adapting it to your task. The pre-trained layers already encode general features, so you need far less data and compute. LLM fine-tuning is the same idea.
+</QA>
+</Interview>
+
+<Takeaways>
+- Tensors + autograd + `nn.Module` + `DataLoader` + a training loop: that's PyTorch.
+- The loop is always: forward, loss, `zero_grad`, `backward`, `step`; validation is forward-only under `eval()`.
+- Save `state_dict`s, keep the best checkpoint by validation loss, and touch the test set once.
+- Transfer learning and mixed precision make serious models practical on one GPU, and lead straight into LLM fine-tuning.
+</Takeaways>

@@ -1,0 +1,183 @@
+---
+summary: How to tell whether a model is actually good — why accuracy lies, the confusion matrix, precision and recall with a worked example, thresholds, regression metrics, cross-validation and data leakage — and how all of it carries over to evaluating LLMs.
+---
+
+## Why evaluation is the most important skill
+
+<Level l="beginner" />
+
+Anyone can train a model or write a prompt. The engineer who can **prove** it works — and say exactly where it fails — is the one who gets trusted with production systems. Every idea in this lesson comes back later when you evaluate RAG systems, agents and fine-tuned LLMs.
+
+## Accuracy can lie
+
+<Level l="beginner" />
+
+Imagine a fraud detector tested on 1,000 transactions, of which 120 are fraud. A "model" that always answers *not fraud* is right 880 times: **88% accuracy**, while catching zero fraud. When one class is rare (fraud, disease, urgent tickets), accuracy alone hides everything that matters.
+
+## The confusion matrix
+
+<Level l="beginner" />
+
+The **confusion matrix** counts the four possible outcomes of a yes/no prediction:
+
+<ConfusionMatrix caption="A fraud model tested on 1,000 transactions (120 real frauds). Green cells are correct answers; red cells are the two different kinds of mistake, and they usually have very different costs." />
+
+| Outcome | Meaning | Fraud example |
+|---|---|---|
+| **True positive (TP)** | Predicted yes, was yes | Caught a real fraud |
+| **False positive (FP)** | Predicted yes, was no | Blocked an honest customer's payment |
+| **False negative (FN)** | Predicted no, was yes | Missed a fraud |
+| **True negative (TN)** | Predicted no, was no | Let an honest payment through |
+
+## Precision, recall and F1
+
+<Level l="beginner" />
+
+- **Precision** = TP / (TP + FP): *of everything I flagged, how much was right?* High precision means few false alarms.
+- **Recall** = TP / (TP + FN): *of everything I should have flagged, how much did I catch?* High recall means few misses.
+- **F1** = the harmonic mean of the two: 2 × P × R / (P + R). It's high only when *both* are high.
+
+<Example title="Worked example: the fraud model above">
+TP = 80, FP = 20, FN = 40, TN = 860.
+
+- Accuracy = (80 + 860) / 1000 = **94%**. Looks great.
+- Precision = 80 / (80 + 20) = **0.80**. 4 in 5 alerts are real fraud.
+- Recall = 80 / (80 + 40) = **0.67**. A third of all frauds get through.
+- F1 = 2 × 0.80 × 0.67 / (0.80 + 0.67) = **0.73**.
+
+The 94% hides that one fraud in three is missed. Whether that's acceptable is a *business* decision, which is why you report precision and recall, not just accuracy.
+</Example>
+
+Which matters more depends on the cost of each mistake:
+
+| Situation | Prioritise | Because |
+|---|---|---|
+| Cancer screening, fraud alerts sent to a human | Recall | A miss is far worse than an extra check |
+| Spam filter, auto-blocking payments | Precision | Wrongly blocking real email or customers is costly |
+| A code-review bot posting comments | Precision | Noisy bots get ignored ([Project 06](/projects/code-review-assistant/)) |
+| An "escalate to human" detector | Recall, with acceptable precision | Missing an angry customer is worse than one unnecessary hand-off |
+
+## Thresholds: you choose the trade-off
+
+<Level l="intermediate" />
+
+Most classifiers output a **probability** (say 0.73 that this is fraud). You turn it into yes/no with a **threshold**. Raising the threshold gives fewer, more confident flags (higher precision, lower recall); lowering it catches more but with more false alarms.
+
+```python title="thresholds.py"
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
+
+X, y = make_classification(n_samples=5000, weights=[0.88], random_state=0)   # 12% positives
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, stratify=y, test_size=0.3, random_state=0)
+proba = LogisticRegression(max_iter=1000).fit(X_tr, y_tr).predict_proba(X_te)[:, 1]
+
+for t in (0.3, 0.5, 0.7):
+    pred = (proba >= t).astype(int)
+    print(f"threshold {t}: precision {precision_score(y_te, pred):.2f}  "
+          f"recall {recall_score(y_te, pred):.2f}  F1 {f1_score(y_te, pred):.2f}")
+
+print(f"ROC-AUC {roc_auc_score(y_te, proba):.3f}   PR-AUC {average_precision_score(y_te, proba):.3f}")
+```
+
+Two threshold-free summaries:
+
+- **ROC-AUC:** the chance the model ranks a random positive above a random negative. 0.5 is guessing, 1.0 is perfect.
+- **PR-AUC** (average precision): the area under the precision–recall curve. More informative than ROC-AUC when positives are rare.
+
+<Tip>
+Pick the threshold on the **validation** set to meet a business target ("recall at least 0.90"), then report precision and recall at that threshold on the **test** set.
+</Tip>
+
+## Metrics for regression
+
+<Level l="intermediate" />
+
+When you predict a number (price, delivery time, tokens per request):
+
+| Metric | What it tells you | Note |
+|---|---|---|
+| MAE (mean absolute error) | Average size of the error, in the target's units | "Off by ₹42,000 on average." Easy to explain. |
+| RMSE (root mean squared error) | Like MAE, but punishes big errors more | Use when large misses are especially bad |
+| MAPE | Average error as a percentage | Breaks when true values are near zero |
+| R² | Share of variation the model explains | 1.0 is perfect; 0 is no better than predicting the average |
+
+## Cross-validation
+
+<Level l="intermediate" />
+
+With a small dataset, one lucky or unlucky split can mislead you. **k-fold cross-validation** splits the data into k parts, trains k times (each time holding out a different part) and averages the scores. You get a mean *and* a spread, which tells you how much to trust the number.
+
+```python title="cross_validation.py"
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+scores = cross_val_score(RandomForestClassifier(random_state=0), X, y, cv=cv, scoring="f1")
+print(f"F1 = {scores.mean():.3f} ± {scores.std():.3f}")
+```
+
+## Data leakage: the silent score-inflater
+
+<Level l="intermediate" />
+
+**Leakage** is when information about the answer sneaks into training, so validation scores look brilliant and production performance collapses. Common causes:
+
+| Leak | Example | Fix |
+|---|---|---|
+| Preprocessing on all data | Fitting the scaler or TF-IDF vocabulary before splitting | Split first; use a pipeline fitted on training data only |
+| Duplicates across splits | The same support ticket appears in train and test | De-duplicate (including near-duplicates) before splitting |
+| Future information | Predicting churn using "number of cancellation calls" logged *after* the churn date | Only use features available at prediction time |
+| Group leakage | Different rows from the same customer in train and test | Split by customer (`GroupKFold`), not by row |
+| Tuning on the test set | Trying 50 settings and keeping whichever scores best on test | Tune on validation; touch the test set once |
+
+<Pitfall title="LLM evaluations leak too">
+If the examples in your few-shot prompt or fine-tuning data also appear in your eval set, the scores are inflated in exactly the same way. Keep eval sets strictly separate, and watch for public benchmarks that may already be in a model's training data.
+</Pitfall>
+
+## Always compare with a baseline
+
+<Level l="beginner" />
+
+A score means nothing without a reference point. Before celebrating "85% accuracy", compare with:
+
+1. **A trivial baseline:** always predict the most common class, or the average value.
+2. **A simple model:** keyword rules, or logistic regression on TF-IDF.
+3. **The current process:** what humans or the existing system achieve today.
+
+If your fancy model barely beats the simple one, the simple one may be the better product: cheaper, faster and easier to explain.
+
+## From classic ML to LLM evaluation
+
+<Level l="intermediate" />
+
+Everything here carries straight over to the [evaluation station](/learn/evaluation/) on the RAG line:
+
+| Classic ML | LLM / RAG equivalent |
+|---|---|
+| Test set | Golden dataset of questions with expected answers |
+| Precision / recall | Retrieval precision@k and recall@k; escalation precision and recall |
+| Accuracy on labels | Exact match, or an LLM judge with a rubric |
+| Leakage | Eval questions appearing in prompts, fine-tuning data or the model's training data |
+| Threshold tuning | Similarity cut-offs, confidence routing, re-ranker score thresholds |
+| Baseline | Prompt-only vs RAG vs fine-tuned, on the same eval set |
+
+<Interview>
+<QA q="When is accuracy a bad metric?">
+When classes are imbalanced or mistakes have different costs. A model that always predicts the majority class can score highly while being useless. Use the confusion matrix, precision, recall, F1 and PR-AUC instead.
+</QA>
+<QA q="Explain precision and recall to a product manager.">
+Precision: when the system raises an alert, how often is it right? Recall: of all the real problems, how many did it catch? Raising the alert threshold trades recall for precision; the right balance depends on what a miss costs compared with a false alarm.
+</QA>
+<QA q="Give an example of data leakage.">
+Fitting a TF-IDF vectoriser or scaler on the full dataset before splitting, or having the same customer's records in both train and test. Validation scores look great, then production performance drops.
+</QA>
+</Interview>
+
+<Takeaways>
+- Accuracy hides failures on rare classes. Read the confusion matrix.
+- Precision = how trustworthy the alerts are; recall = how many real cases you catch. The threshold sets the trade-off.
+- Use cross-validation for small data, guard against leakage, and always compare with a simple baseline.
+- These habits are exactly what LLM, RAG and agent evaluation are built on.
+</Takeaways>

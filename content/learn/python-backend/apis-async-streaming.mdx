@@ -1,0 +1,238 @@
+---
+summary: How HTTP APIs work, how to call them reliably with timeouts and retries, how async lets you make many slow calls at once, and how to build your own API that streams responses token by token.
+---
+
+## Every model is an API call
+
+<Level l="beginner" />
+
+When your code "uses Claude" or "uses GPT", it sends an **HTTP request** over the internet to the provider's servers and gets back an **HTTP response**. Every vector database, every SaaS tool your agent uses and every app you build is the same: requests and responses. Understanding HTTP well is half of AI engineering.
+
+```mermaid caption="One request to a model API. The response can arrive all at once, or streamed as small chunks so the user sees the answer start immediately."
+sequenceDiagram
+  participant App as Your app
+  participant API as Model API
+  App->>API: POST /v1/messages<br/>headers: API key, content-type<br/>body: JSON (model, messages)
+  Note right of API: Model generates<br/>(1–30 seconds)
+  API-->>App: 200 OK + JSON reply
+  App->>API: Same request with "stream": true
+  API-->>App: chunk: "Your"
+  API-->>App: chunk: " refund"
+  API-->>App: chunk: " is on its way."
+```
+
+## HTTP in five minutes
+
+<Level l="beginner" />
+
+A request has four parts:
+
+| Part | Example | Meaning |
+|---|---|---|
+| Method | `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | What you want to do: read, create, replace, update, remove |
+| URL | `https://api.example.com/v1/orders/1001` | Which resource |
+| Headers | `Authorization: Bearer sk-...`, `Content-Type: application/json` | Metadata: who you are, what format you're sending |
+| Body | `{"model": "...", "messages": [...]}` | The data, usually JSON (not used with `GET`) |
+
+The response comes back with a **status code**. Learn these; you'll see them in every log:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| 200 / 201 | OK / Created | Use the response |
+| 400 | Bad request | Your payload is wrong; read the error message. Don't retry. |
+| 401 / 403 | Not authenticated / not allowed | Check your API key and permissions. Don't retry. |
+| 404 | Not found | Wrong URL or ID |
+| 422 | Validation error | The JSON was valid but a field was wrong |
+| **429** | **Rate limited** | **Wait, then retry. Respect the `Retry-After` header.** |
+| 500 / 502 / 503 | Server error | Usually temporary: retry with backoff |
+| 529 | Overloaded (some model providers) | Retry with backoff, or fall back to another model |
+
+<Analogy>
+A REST API is a restaurant counter. The method is what you're asking for (look at the menu, place an order, change it, cancel it). The URL is which dish. Headers are your loyalty card. The body is your order details. The status code is the reply: "here you go" (200), "we don't do that" (400), "who are you?" (401), "kitchen's swamped, wait a minute" (429), "the oven broke" (500).
+</Analogy>
+
+## Calling an API properly
+
+<Level l="beginner" />
+
+`httpx` is a modern HTTP client for Python that supports both normal and async code.
+
+```python title="call_api.py"
+import httpx
+
+resp = httpx.get("https://api.github.com/repos/python/cpython", timeout=10.0)
+resp.raise_for_status()                 # turns 4xx/5xx into an exception
+data = resp.json()
+print(data["full_name"], data["stargazers_count"])
+```
+
+Always set a **timeout**. Without one, a stuck connection can hang your program forever. For model calls, 60–120 seconds is common because long answers take time to generate.
+
+### Retries with backoff
+
+Temporary failures (429, 5xx, timeouts) are normal at scale. Retry them, but wait longer each time (**exponential backoff**) and add randomness (**jitter**) so a thousand clients don't all retry at the same instant.
+
+```python title="retry.py"
+import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
+
+def is_retryable(err: BaseException) -> bool:
+    if isinstance(err, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    return isinstance(err, httpx.HTTPStatusError) and err.response.status_code in (429, 500, 502, 503, 529)
+
+@retry(retry=retry_if_exception(is_retryable),
+       wait=wait_random_exponential(min=1, max=30),    # ~1s, 2s, 4s… with jitter, capped at 30s
+       stop=stop_after_attempt(5), reraise=True)
+def get_json(url: str) -> dict:
+    r = httpx.get(url, timeout=20.0)
+    r.raise_for_status()
+    return r.json()
+```
+
+<Pitfall title="Don't retry everything">
+Retrying a 400 or 401 just repeats the same mistake five times and burns your rate limit. Retry only errors that might succeed next time. And never blindly retry a request that *changes* something (like "create order") unless the API supports **idempotency keys**, or you'll create duplicates.
+</Pitfall>
+
+## Async: doing many slow things at once
+
+<Level l="intermediate" />
+
+An LLM call spends almost all its time *waiting*: for the network and for the model to generate. If you have 100 tickets to classify and call the model 100 times one after another at 3 seconds each, that's 5 minutes. With **async**, your program starts the next request while earlier ones are still waiting, and the same work takes seconds.
+
+<SyncVsAsync caption="Sequential code waits for each call to finish before starting the next. Async code starts all the calls and handles each response as it arrives. In real code, a semaphore caps how many run at once so you stay under the provider's rate limit." />
+
+```python title="async_batch.py"
+import asyncio, httpx
+
+URLS = [f"https://httpbin.org/delay/1?n={i}" for i in range(20)]   # each takes ~1 second
+LIMIT = asyncio.Semaphore(5)                                     # at most 5 requests in flight
+
+async def fetch(client: httpx.AsyncClient, url: str) -> int:
+    async with LIMIT:
+        r = await client.get(url, timeout=30)
+        return r.status_code
+
+async def main():
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*(fetch(client, u) for u in URLS), return_exceptions=True)
+    ok = sum(1 for r in results if r == 200)
+    print(f"{ok}/{len(URLS)} succeeded")    # ~4 seconds instead of ~20
+
+asyncio.run(main())
+```
+
+Three things to remember:
+
+1. `async def` defines a coroutine; `await` pauses it until a result is ready, letting other coroutines run meanwhile.
+2. `asyncio.gather` runs many coroutines together. `return_exceptions=True` stops one failure from cancelling the rest.
+3. A **semaphore** limits concurrency. Without one, 10,000 requests fire at once and you hit rate limits immediately.
+
+<Tip>
+Async helps with *waiting* (network, disk, databases). It doesn't make CPU-heavy work like running a local model or parsing big PDFs faster; use multiple processes or a job queue for that.
+</Tip>
+
+## Build your own API with FastAPI
+
+<Level l="intermediate" />
+
+FastAPI turns type-hinted Python functions into a validated HTTP API with automatic documentation at `/docs`. It's the standard way to put an AI feature behind an endpoint.
+
+```python title="app/main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="Ticket Classifier")
+
+class TicketIn(BaseModel):
+    text: str = Field(min_length=3, max_length=4000)
+
+class TicketOut(BaseModel):
+    category: str
+    confidence: float
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/classify", response_model=TicketOut)
+async def classify(t: TicketIn):
+    text = t.text.lower()
+    if "refund" in text or "charged" in text:
+        return TicketOut(category="billing", confidence=0.9)
+    if "password" in text or "login" in text:
+        return TicketOut(category="account", confidence=0.9)
+    raise HTTPException(status_code=422, detail="Could not classify; route to a human.")
+```
+
+```bash
+pip install fastapi uvicorn
+uvicorn app.main:app --reload       # open http://127.0.0.1:8000/docs and try it
+```
+
+FastAPI rejects a request with missing or too-long `text` *before* your function runs, with a clear 422 error. That's free input validation, and the first layer of security for any AI endpoint.
+
+## Streaming responses with Server-Sent Events
+
+<Level l="intermediate" />
+
+People won't stare at a spinner for 15 seconds. **Streaming** sends the answer as it's generated, so the first words appear in under a second. The simplest transport is **Server-Sent Events (SSE)**: one long HTTP response where the server writes `data: ...` lines as it goes.
+
+```python title="app/stream.py"
+import asyncio, json
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+app = FastAPI()
+
+async def generate_tokens(question: str):
+    # In a real app, this loops over the model SDK's stream instead.
+    for word in f"Here is a streamed answer to: {question}".split():
+        await asyncio.sleep(0.08)
+        yield word + " "
+
+@app.get("/ask/stream")
+async def ask_stream(q: str):
+    async def event_stream():
+        async for token in generate_tokens(q[:500]):
+            yield f"data: {json.dumps({'token': token})}\n\n"
+        yield "data: [DONE]\n\n"
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
+```
+
+And a client that prints tokens as they arrive:
+
+```python title="stream_client.py"
+import httpx, json
+
+with httpx.stream("GET", "http://127.0.0.1:8000/ask/stream", params={"q": "refund status"}, timeout=60) as r:
+    for line in r.iter_lines():
+        if line.startswith("data: ") and line != "data: [DONE]":
+            print(json.loads(line[6:])["token"], end="", flush=True)
+```
+
+With a real model, the inner generator loops over the provider's stream (for example `client.messages.stream(...)` in the Anthropic SDK) and yields each text chunk. Everything else stays the same.
+
+<Pitfall title="Streaming hides errors">
+With streaming, you've already sent "200 OK" before the model finishes. If it fails halfway, you can't change the status code. Send an explicit error event (`data: {"error": "..."}`) and make the front end handle it.
+</Pitfall>
+
+<Interview>
+<QA q="Which HTTP errors should you retry when calling an LLM API?">
+Timeouts, network errors, 429 (rate limited), and 5xx/529 (server or overload errors), with exponential backoff and jitter, respecting `Retry-After`. Never retry 400, 401, 403 or 422: they will fail the same way every time.
+</QA>
+<QA q="Why use async for LLM calls?">
+LLM calls are I/O-bound: almost all the time is spent waiting. Async lets one process wait on many calls at once, so a batch finishes in roughly the time of the slowest call instead of the sum of all calls. A semaphore keeps concurrency under the rate limit.
+</QA>
+<QA q="How would you stream an LLM answer to a web front end?">
+Use the provider's streaming API on the server and forward each chunk to the browser over Server-Sent Events (or WebSockets for two-way audio or chat). Send a final `[DONE]` event and explicit error events, because the HTTP status is already 200 once streaming starts.
+</QA>
+</Interview>
+
+<Takeaways>
+- Every model, database and tool is reached through HTTP: know methods, headers, JSON bodies and status codes.
+- Always set timeouts; retry only temporary failures, with exponential backoff and jitter.
+- Async with a semaphore turns minutes of sequential waiting into seconds.
+- FastAPI gives you validated endpoints for free; Server-Sent Events let you stream answers token by token.
+</Takeaways>

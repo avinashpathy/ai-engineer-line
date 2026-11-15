@@ -1,0 +1,165 @@
+---
+summary: Enough SQL to store and query your app's data safely (including why parameterised queries stop SQL injection), and the Git workflow every portfolio project needs.
+---
+
+## Why SQL still matters in AI
+
+<Level l="beginner" />
+
+AI apps are full of ordinary data: users, conversations, documents, feedback, evaluation results, costs. Most of it lives in a relational database, usually **PostgreSQL**. Postgres can even store embeddings with the `pgvector` extension, so the same database serves your app data *and* your vector search. You'll also meet SQL inside AI features: "text-to-SQL" agents write queries for users, and you need to read them to know whether they're right and safe.
+
+## The core of SQL
+
+<Level l="beginner" />
+
+Two small tables for a support chatbot:
+
+```sql title="schema.sql"
+CREATE TABLE conversations (
+  id          SERIAL PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  started_at  TIMESTAMP NOT NULL DEFAULT now(),
+  resolved    BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE messages (
+  id               SERIAL PRIMARY KEY,
+  conversation_id  INT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content          TEXT NOT NULL,
+  tokens           INT,
+  created_at       TIMESTAMP NOT NULL DEFAULT now()
+);
+```
+
+The six clauses that cover most queries you'll write:
+
+| Clause | Does | Example |
+|---|---|---|
+| `SELECT ... FROM` | Pick columns from a table | `SELECT id, user_id FROM conversations` |
+| `WHERE` | Filter rows | `WHERE resolved = false` |
+| `ORDER BY ... LIMIT` | Sort and take the top N | `ORDER BY started_at DESC LIMIT 10` |
+| `GROUP BY` + aggregates | Summarise per group | `COUNT(*)`, `SUM(tokens)`, `AVG(...)` |
+| `JOIN ... ON` | Combine related tables | messages joined to their conversation |
+| `HAVING` | Filter groups after aggregating | `HAVING COUNT(*) > 20` |
+
+```sql title="queries.sql"
+-- Which users ran the most expensive conversations this week?
+SELECT c.user_id,
+       COUNT(DISTINCT c.id)  AS conversations,
+       SUM(m.tokens)         AS total_tokens
+FROM conversations c
+JOIN messages m ON m.conversation_id = c.id
+WHERE c.started_at >= now() - INTERVAL '7 days'
+GROUP BY c.user_id
+HAVING SUM(m.tokens) > 10000
+ORDER BY total_tokens DESC
+LIMIT 10;
+```
+
+<Tip title="Read queries from the inside out">
+SQL runs in a different order than it's written: `FROM`/`JOIN` → `WHERE` → `GROUP BY` → `HAVING` → `SELECT` → `ORDER BY` → `LIMIT`. When a query confuses you, read it in that order.
+</Tip>
+
+### Indexes
+
+An **index** lets the database find rows without scanning the whole table, like the index at the back of a book. Add one on columns you filter or join on often:
+
+```sql
+CREATE INDEX idx_messages_conversation ON messages (conversation_id);
+```
+
+## SQL injection, and the one rule that prevents it
+
+<Level l="beginner" />
+
+The most famous security bug in history happens when user input is pasted *into* SQL text.
+
+```python title="DON'T do this"
+user_id = request_value          # attacker sends:  x' OR '1'='1
+query = f"SELECT * FROM conversations WHERE user_id = '{user_id}'"
+# becomes: SELECT * FROM conversations WHERE user_id = 'x' OR '1'='1'  → every user's data
+```
+
+The fix is **parameterised queries**: send the SQL and the values separately, so the database never treats a value as code.
+
+```python title="db.py"
+import sqlite3
+
+conn = sqlite3.connect("app.db")
+conn.execute("CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, user_id TEXT, rating INT, comment TEXT)")
+
+def add_feedback(user_id: str, rating: int, comment: str) -> None:
+    conn.execute("INSERT INTO feedback (user_id, rating, comment) VALUES (?, ?, ?)",
+                 (user_id, rating, comment))          # values passed separately: safe
+    conn.commit()
+
+def feedback_for(user_id: str) -> list[tuple]:
+    return conn.execute("SELECT rating, comment FROM feedback WHERE user_id = ?", (user_id,)).fetchall()
+
+add_feedback("u42", 2, "The bot didn't understand 'refund' in Hindi")   # quotes are harmless
+print(feedback_for("u42"))
+```
+
+With PostgreSQL in Python (`psycopg`), the placeholder is `%s` instead of `?`, but the rule is the same: **never build SQL with f-strings or string concatenation from user input.** ORMs like SQLAlchemy parameterise for you.
+
+<Pitfall title="This applies doubly to text-to-SQL agents">
+When an LLM writes SQL, the "user input" is the whole query. Parameterisation can't save you there. The real protection is a **database account that can only read** the tables it needs, plus a statement timeout and row limit. [Project 07](/projects/sales-data-analyst/) builds exactly that.
+</Pitfall>
+
+## Git: the habit that makes you hireable
+
+<Level l="beginner" />
+
+**Git** records every change to your code so you can go back, branch off to try ideas, and collaborate. **GitHub** hosts your repositories, and it's where recruiters look at your work. Every project on this site should live in its own repository from day one.
+
+```mermaid caption="The everyday workflow: work on a branch, commit small steps, open a pull request, let CI check it, merge to main."
+gitGraph
+  commit id: "initial project"
+  commit id: "add FastAPI skeleton"
+  branch feature/rag
+  checkout feature/rag
+  commit id: "ingest PDFs"
+  commit id: "add hybrid search"
+  commit id: "add eval set"
+  checkout main
+  merge feature/rag id: "PR #1 merged"
+  commit id: "README with results"
+```
+
+The commands you'll use daily:
+
+```bash title="Terminal"
+git init                                  # start tracking a folder (once)
+git status                                # what changed?
+git add app/ README.md                    # stage specific files
+git commit -m "Add hybrid search with BM25 + embeddings"
+git switch -c feature/reranker            # new branch for an experiment
+git push -u origin feature/reranker       # publish it, then open a pull request on GitHub
+git switch main && git pull               # back to main, get the latest
+git log --oneline -10                     # recent history
+```
+
+### Good habits
+
+- **Small, focused commits** with messages that say *what and why*: "Add re-ranker; hit@5 0.81 → 0.90" beats "updates".
+- **`.gitignore` before the first commit**: `.env`, `.venv/`, `__pycache__/`, `data/raw/`, model weights.
+- **Never commit secrets.** If you do, revoke the key immediately: deleting the file doesn't remove it from history.
+- **Large files** (datasets, model weights) don't belong in Git. Store them in cloud storage or Hugging Face and document how to download them.
+- **A README for every repo**: what it does, how to run it, results, and a screenshot or demo GIF.
+
+<Interview>
+<QA q="What is SQL injection and how do you prevent it?">
+It's when user input is concatenated into SQL text and gets executed as code, e.g. `' OR '1'='1` returning every row. Prevent it with parameterised queries (values sent separately from the SQL), an ORM, and least-privilege database accounts.
+</QA>
+<QA q="How would you safely let an LLM run SQL against a company database?">
+Give it a dedicated read-only account limited to the needed tables or views, enforce a statement timeout and row cap, allow only a single SELECT, log every query, and never let it touch tables with sensitive personal data unless access control is applied in the database itself.
+</QA>
+</Interview>
+
+<Takeaways>
+- `SELECT`, `WHERE`, `JOIN`, `GROUP BY`, `ORDER BY` and `LIMIT` cover most of the SQL you'll write. Index what you filter on.
+- Never build SQL from user input with string formatting: always use parameters.
+- For LLM-written SQL, the database account's permissions are the real safety net.
+- Git from day one: small commits, branches, pull requests, a `.gitignore`, no secrets, a good README.
+</Takeaways>
