@@ -1,0 +1,270 @@
+---
+order: 2
+title: Resume–Job Matcher
+tagline: Upload a résumé and a job description and get an explainable match score, skill evidence quoted from the résumé, and tailored bullet points that never invent experience.
+level: Intermediate
+weeks: 1–2 weeks
+lines: [l]
+stack: [Python, pymupdf4llm, Pydantic, LLM API, sentence-transformers, rapidfuzz, FastAPI, Streamlit]
+skills: [PDF parsing, Structured extraction, Embeddings, Hybrid scoring, Grounded generation, Fairness testing, Human-correlation evals]
+---
+
+## What you'll build
+
+Upload a résumé (PDF) and paste a job description. The system extracts **structured profiles** from both, computes an **explainable hybrid match score**, lists strengths and gaps **with evidence quoted from the résumé**, and suggests tailored résumé bullets grounded in what the candidate actually did.
+
+It's a great first full project because it touches every core LLM-engineering skill, and because it has a built-in trap: LLMs love to "improve" résumés by inventing achievements. Your job is to make that impossible.
+
+<Note title="Before you start">
+Finish [LLM APIs](/learn/llm-apis/) (structured outputs) and [Prompt engineering](/learn/prompt-engineering/). Time: 8–10 hours for the core.
+</Note>
+
+### Success criteria
+
+| Metric | Target |
+|---|---|
+| Correlation with human ratings (Spearman ρ) | ≥ 0.7 on 30 pairs |
+| Score variance across 3 runs | Hybrid much lower than LLM-only |
+| Evidence precision (quotes that exist in the résumé) | ≥ 98% after verification |
+| Fairness: change only name and pronouns | Score change within run-to-run noise |
+| Invented facts in suggested bullets | 0 |
+
+## Architecture
+
+```mermaid caption="Deterministic components (skill coverage, experience) keep the score stable and auditable; the LLM adds judgement; verification steps catch hallucinated evidence."
+flowchart TD
+  R[résumé.pdf] --> P[Parse to Markdown<br/>pymupdf4llm]
+  P --> XC[LLM extract<br/>CandidateProfile]
+  J[Job description] --> XJ[LLM extract<br/>JobProfile]
+  XC --> S[Skill coverage<br/>embeddings]
+  XJ --> S
+  XC --> LR[LLM review<br/>with quoted evidence]
+  XJ --> LR
+  S --> H[Hybrid score]
+  LR --> V[Verify quotes exist<br/>rapidfuzz]
+  V --> H
+  H --> RPT[MatchReport]
+  XC --> T[Tailored bullets]
+  T --> TV[Reject new numbers<br/>or new skills]
+  TV --> RPT
+```
+
+## Milestones
+
+### 1. Define the schemas
+
+The schemas *are* the product spec. Note what's deliberately missing: name, age, gender, photo, address.
+
+```python title="app/schemas.py"
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
+
+class Experience(BaseModel):
+    company: str
+    title: str
+    start: Optional[str] = Field(None, description="YYYY-MM if known")
+    end: Optional[str] = Field(None, description="YYYY-MM or 'present'")
+    highlights: list[str] = Field(description="achievement bullets copied or lightly normalised from the résumé")
+    skills_used: list[str]
+
+class CandidateProfile(BaseModel):
+    headline: str
+    total_years_experience: Optional[float]
+    skills: list[str] = Field(description="normalised technology/skill names")
+    experience: list[Experience]
+    education: list[str]
+    certifications: list[str] = []
+
+class JobProfile(BaseModel):
+    title: str
+    seniority: Literal["intern", "junior", "mid", "senior", "lead", "unknown"]
+    experience_years_min: Optional[int]
+    must_have_skills: list[str]
+    nice_to_have_skills: list[str]
+    responsibilities: list[str]
+    domain: Optional[str]
+
+class SkillEvidence(BaseModel):
+    skill: str
+    status: Literal["strong", "partial", "missing"]
+    evidence: Optional[str] = Field(None, description="exact résumé phrase; null if missing")
+
+class MatchReport(BaseModel):
+    overall_score: int = Field(ge=0, le=100)
+    skill_evidence: list[SkillEvidence]
+    strengths: list[str]
+    gaps: list[str]
+    recommendation: Literal["strong_fit", "possible_fit", "weak_fit"]
+```
+
+### 2. Parse the résumé
+
+```python title="app/parse.py"
+import re, pymupdf4llm
+
+def resume_text(path: str) -> str:
+    md = pymupdf4llm.to_markdown(path)     # keeps headings and bullets
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return md[:30_000]                      # guard against huge files
+```
+
+Test with three or four layouts: single column, two columns, tables, and a scanned PDF. Scanned PDFs need OCR, or send page images to a vision model.
+
+### 3. Extract structured profiles
+
+```python title="app/extract.py"
+EXTRACT_CANDIDATE = """Extract a structured profile from the résumé inside <resume> tags.
+Rules:
+- Copy achievement bullets faithfully; you may shorten but never add facts or numbers.
+- Normalise skill names (e.g. "k8s" -> "Kubernetes", "Py" -> "Python").
+- total_years_experience: compute from dated roles if possible, else null.
+- Ignore personal details such as name, photo, age, gender, address.
+<resume>
+{text}
+</resume>"""
+
+def extract_candidate(text: str) -> CandidateProfile:
+    return llm.generate(EXTRACT_CANDIDATE.format(text=text), schema=CandidateProfile, max_tokens=3000).data
+
+def extract_job(text: str) -> JobProfile:
+    return llm.generate(EXTRACT_JOB.format(text=text), schema=JobProfile, max_tokens=2000).data
+```
+
+<Tip title="Fairness by design">
+Dropping personal attributes at extraction time means name, gender, age and photo *can't* influence any later step. That's stronger than asking the model to "be fair".
+</Tip>
+
+### 4. Deterministic skill matching with embeddings
+
+Exact string matching misses synonyms ("Postgres" vs "PostgreSQL"). Embeddings catch near-matches, and two thresholds separate strong from partial.
+
+```python title="app/skills.py"
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+emb = SentenceTransformer("BAAI/bge-small-en-v1.5")
+SYNONYMS = {"postgres": "postgresql", "k8s": "kubernetes", "gcp": "google cloud"}
+norm = lambda s: SYNONYMS.get(s.lower().strip(), s.lower().strip())
+
+def skill_coverage(job_skills, cand_skills, strong=0.82, partial=0.65):
+    if not job_skills:
+        return [], 1.0
+    J = emb.encode([norm(s) for s in job_skills], normalize_embeddings=True)
+    C = emb.encode([norm(s) for s in cand_skills] or [""], normalize_embeddings=True)
+    sims = J @ C.T
+    rows = []
+    for i, skill in enumerate(job_skills):
+        j = int(sims[i].argmax()); s = float(sims[i, j])
+        status = "strong" if s >= strong else "partial" if s >= partial else "missing"
+        rows.append({"skill": skill, "closest": cand_skills[j] if cand_skills else None,
+                     "similarity": round(s, 2), "status": status})
+    score = np.mean([{"strong": 1.0, "partial": 0.5, "missing": 0.0}[r["status"]] for r in rows])
+    return rows, float(score)
+```
+
+Calibrate the thresholds on 50 hand-labelled skill pairs: print pairs near each threshold and adjust until most agree with your judgement.
+
+### 5. LLM review + hybrid score
+
+```python title="app/match.py"
+def match(cand: CandidateProfile, job: JobProfile) -> dict:
+    rows, must = skill_coverage(job.must_have_skills, cand.skills)
+    _, nice = skill_coverage(job.nice_to_have_skills, cand.skills)
+    report = llm.generate(REVIEW.format(job=job.model_dump_json(), cand=cand.model_dump_json(),
+                                        coverage=rows), schema=MatchReport, max_tokens=2500).data
+    yrs, need = cand.total_years_experience or 0, job.experience_years_min
+    exp = 1.0 if need is None or yrs >= need else max(0.0, yrs / need)
+    hybrid = round(100 * (0.45 * must + 0.15 * nice + 0.15 * exp) + 0.25 * report.overall_score)
+    return {"hybrid_score": hybrid,
+            "components": {"must_have": must, "nice_to_have": nice, "experience": exp,
+                           "llm_review": report.overall_score},
+            "report": report}
+```
+
+<Tip title="Why hybrid?">
+Pure LLM scores drift between runs and are hard to explain. Deterministic components are stable and auditable; the LLM adds judgement about depth and relevance. Showing the breakdown builds user trust.
+</Tip>
+
+### 6. Verify the evidence
+
+```python title="app/verify.py"
+from rapidfuzz import fuzz
+
+def verify_evidence(report: MatchReport, resume_md: str) -> MatchReport:
+    text = resume_md.lower()
+    for ev in report.skill_evidence:
+        if ev.evidence and fuzz.partial_ratio(ev.evidence.lower(), text) < 85:
+            ev.status, ev.evidence = "missing", None   # quote not found → don't trust it
+    return report
+```
+
+This tiny deterministic check catches most invented evidence. It's a pattern you'll reuse everywhere: **cheap code checks on top of an LLM**.
+
+### 7. Grounded bullet suggestions
+
+Ask for rewrites of *existing* bullets only, each returned with its original. Then reject any suggestion whose `original` doesn't appear in the parsed résumé, or whose `suggested` text introduces a number or skill name that wasn't in the original. A simple diff of numbers and skill tokens is enough.
+
+### 8. API and UI
+
+```python title="app/main.py"
+import tempfile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+
+app = FastAPI(title="Resume Matcher")
+MAX_BYTES = 5 * 1024 * 1024
+
+@app.post("/match")
+async def match_endpoint(resume: UploadFile = File(...), jd: str = Form(..., max_length=20_000)):
+    data = await resume.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES or not data.startswith(b"%PDF"):
+        raise HTTPException(400, "Upload a PDF under 5 MB.")
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+        f.write(data); f.flush(); text = resume_text(f.name)
+    cand, job = extract_candidate(text), extract_job(jd)
+    result = match(cand, job)
+    result["report"] = verify_evidence(result["report"], text)
+    return {"candidate": cand, "job": job, **result}
+```
+
+The Streamlit page shows: a score gauge, the component breakdown, a skills table (strong / partial / missing, with evidence), strengths and gaps, and suggested bullets as a side-by-side diff.
+
+## Evaluation plan
+
+1. Collect 30 résumé–JD pairs (your own résumé variants, public sample résumés, real job posts).
+2. Have two people rate each pair 1–5 independently and average them.
+3. Compute Spearman correlation between the hybrid score and human ratings, and between the LLM-only score and human ratings.
+4. Run each pair three times and compare score variance.
+5. **Fairness test:** duplicate résumés changing only the name and gendered pronouns. Scores must not move beyond normal noise.
+6. **Evidence precision** before and after step 6.
+
+```python title="evals/correlation.py"
+from scipy.stats import spearmanr
+rho, p = spearmanr(df.hybrid_score, df.human_rating)
+print(f"Spearman ρ = {rho:.2f} (p={p:.3f})")
+```
+
+## Security & privacy checklist
+
+- [ ] Accept only PDFs under a size limit; check the file signature, not just the extension.
+- [ ] Parse uploads in a temporary file that's deleted immediately; don't store résumés unless the user opts in.
+- [ ] Wrap résumé and JD text in tags and tell the model to treat it as data (résumés can contain injected instructions in white text).
+- [ ] Redact emails and phone numbers from logs.
+- [ ] Rate-limit `/match` per user or IP; cap the JD length.
+- [ ] Clearly label the tool as decision support, not an automated hiring decision.
+
+## Deploy it
+
+Containerise the FastAPI service and the Streamlit UI separately, deploy both to a container platform (Render, Railway, Fly.io, Azure Container Apps), and put an API key or login in front of `/match` so strangers can't spend your LLM budget.
+
+## Stretch goals
+
+- Batch-rank 50 candidates for one JD (cache the JD extraction; run in parallel with a semaphore).
+- Cover-letter drafting grounded in the matched evidence.
+- Store profiles in Postgres with pgvector for semantic candidate search.
+- A Next.js front end.
+
+## Show it off
+
+README: architecture, schema design, the scoring formula and why, evaluation results (correlation, variance, fairness test), cost per match, and limitations. Be explicit that it must be audited for bias before any real recruitment use, and that candidates should be able to see and contest results.
+
+**Interview talking points:** why a hybrid score beats an LLM score; how you detected invented evidence; how you tested for bias; how you'd scale to 10,000 candidates.

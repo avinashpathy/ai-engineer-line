@@ -1,0 +1,166 @@
+---
+summary: Set up a clean, safe AI engineering workstation once, then reuse it for every lesson and project on this site.
+---
+
+## What you're setting up
+
+<Level l="beginner" />
+
+You'll use the same toolkit for every lesson and project. Setting it up properly once saves hours of "it works on my machine" later.
+
+```mermaid caption="Your workstation. Everything runs locally except the model APIs and the free cloud GPUs you'll borrow for training."
+flowchart TD
+  subgraph Laptop["Your laptop"]
+    A[VS Code + Python 3.11+] --> B[Virtual environment<br/>per project]
+    B --> C[.env file<br/>API keys — never committed]
+    A --> D[Git → GitHub]
+    A --> E[Docker Desktop]
+  end
+  B -- HTTPS --> F[(Model APIs<br/>Claude · OpenAI · Gemini)]
+  D --> G[GitHub repo<br/>one per project]
+  H[Google Colab / Kaggle<br/>free GPUs] -. training jobs .-> G
+```
+
+## 1. Install the basics
+
+<Level l="beginner" />
+
+| Tool | Why you need it | Get it |
+|---|---|---|
+| Python 3.11 or newer | Every lesson's code | [python.org/downloads](https://www.python.org/downloads/) |
+| VS Code | Editor with Python and Jupyter support | [code.visualstudio.com](https://code.visualstudio.com/) |
+| Git | Version control; every project goes on GitHub | [git-scm.com](https://git-scm.com/downloads) |
+| Docker Desktop | Run databases and deploy services (from the R line onwards) | [docker.com](https://www.docker.com/products/docker-desktop/) |
+| A GitHub account | Your portfolio lives here | [github.com](https://github.com/) |
+
+Check they're installed:
+
+```bash
+python --version      # 3.11 or newer
+git --version
+docker --version      # can wait until you reach the RAG line
+```
+
+## 2. One virtual environment per project
+
+<Level l="beginner" />
+
+A **virtual environment** keeps each project's libraries separate, so upgrading one project can never break another.
+
+```bash title="Terminal"
+mkdir genai && cd genai
+python -m venv .venv
+# macOS / Linux
+source .venv/bin/activate
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+Then install what you need, in layers. Start with the core and add the rest when a lesson calls for it:
+
+```bash title="Terminal"
+# Core: model APIs, validation, web APIs
+pip install anthropic openai litellm pydantic fastapi uvicorn httpx tenacity tiktoken python-dotenv
+
+# Retrieval and agents (R and A lines)
+pip install sentence-transformers langchain langchain-community langgraph llama-index
+pip install chromadb qdrant-client "psycopg[binary]" pgvector rank_bm25 ragas deepeval
+
+# Tooling and observability (A and P lines)
+pip install "mcp[cli]" langfuse opentelemetry-sdk prometheus-client
+
+# Fine-tuning (needs a GPU — use Colab or Kaggle)
+pip install transformers datasets accelerate peft trl bitsandbytes
+```
+
+<Tip>
+Save exact versions with `pip freeze > requirements.txt` once a project works. When you come back in three months, `pip install -r requirements.txt` gives you the same setup instead of whatever versions are newest that day.
+</Tip>
+
+## 3. Keep API keys secret
+
+<Level l="beginner" />
+
+API keys are like passwords that cost money. Anyone who has yours can run up your bill.
+
+1. Put keys in a file called `.env` in your project folder:
+
+   ```bash title=".env"
+   ANTHROPIC_API_KEY=your-key-here
+   OPENAI_API_KEY=your-key-here
+   ```
+
+2. Add `.env` to `.gitignore` **before your first commit**:
+
+   ```bash title=".gitignore"
+   .env
+   .venv/
+   __pycache__/
+   ```
+
+3. Load keys in code instead of pasting them in:
+
+   ```python title="hello_llm.py"
+   from dotenv import load_dotenv
+   import anthropic
+
+   load_dotenv()                      # reads .env into environment variables
+   client = anthropic.Anthropic()     # picks up ANTHROPIC_API_KEY automatically
+   msg = client.messages.create(
+       model="claude-sonnet-4-5",     # check the provider docs for current model names
+       max_tokens=200,
+       messages=[{"role": "user", "content": "Explain an AI Engineer's job in one sentence."}],
+   )
+   print(msg.content[0].text)
+   ```
+
+<Pitfall title="Leaked keys are found within minutes">
+Bots scan public GitHub repositories for API keys around the clock. If you ever commit a key, even for a second, treat it as stolen: revoke it in the provider's console and create a new one. Deleting the commit isn't enough, because the key stays in Git history.
+</Pitfall>
+
+Also set a **monthly spending limit** in each provider's billing settings. A loop bug at 2 a.m. shouldn't be able to cost more than you're willing to lose.
+
+<Note title="Model names change">
+Code on this site uses model names that were current when it was written. Providers release new models often, so check your provider's documentation and swap in current names. Libraries such as LangChain, TRL and LlamaIndex also change; when a snippet errors, check that library's latest docs first.
+</Note>
+
+## 4. Free GPUs for training
+
+<Level l="beginner" />
+
+You don't need to buy a GPU. Fine-tuning and the mini-GPT lesson run fine on free notebooks:
+
+- **Google Colab**: Runtime → Change runtime type → T4 GPU.
+- **Kaggle Notebooks**: Settings → Accelerator → GPU. About 30 free GPU hours a week.
+
+Keep your code in GitHub and open it from the notebook, so nothing lives only in a browser tab.
+
+## 5. A project template you'll reuse
+
+<Level l="intermediate" />
+
+Every project on this site uses roughly this layout. Copy it once and reuse it.
+
+```text title="project layout"
+my-project/
+├── app/
+│   ├── main.py          # FastAPI entry point
+│   ├── llm.py           # one place that talks to model APIs
+│   ├── prompts/         # prompts as versioned files, not strings scattered in code
+│   └── schemas.py       # Pydantic models for inputs and outputs
+├── evals/
+│   ├── golden.jsonl     # your evaluation set
+│   └── run_evals.py
+├── tests/
+├── .env.example         # names of the variables, no real values
+├── .gitignore
+├── Dockerfile
+├── requirements.txt
+└── README.md            # what it does, how to run it, eval results
+```
+
+<Takeaways>
+- Python 3.11+, VS Code, Git, Docker and a GitHub account cover the whole curriculum.
+- One virtual environment per project; pin versions once it works.
+- Keys live in `.env`, `.env` lives in `.gitignore`, and every provider account has a spending limit.
+</Takeaways>

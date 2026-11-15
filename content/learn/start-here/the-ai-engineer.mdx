@@ -1,0 +1,172 @@
+---
+summary: What AI Engineers actually do, what job descriptions ask for, the layers of the GenAI stack, and how a backend developer's skills carry over.
+---
+
+## What is an AI Engineer?
+
+<Level l="beginner" />
+
+An **AI Engineer** builds products and systems on top of *foundation models*: large language models (LLMs), embedding models, and models that understand images and speech. The job is much closer to software engineering than to research. You rarely train a model from scratch. Instead you combine models with **data, tools, retrieval, prompts, evaluation and infrastructure** to make something reliable that people will pay for.
+
+<Analogy>
+Model labs build engines. AI Engineers build the car around the engine: the steering (prompts and control flow), the fuel system (retrieval and data), the dashboard (observability), the brakes (guardrails) and the crash tests (evaluation). They also make sure the car is affordable to run (cost engineering).
+</Analogy>
+
+It helps to see how the role sits next to the jobs it's often confused with:
+
+| Role | The question they answer | Typical work |
+|---|---|---|
+| ML Researcher | How do we make better models? | New architectures, training methods, papers |
+| ML Engineer | How do we train and serve models at scale? | Training pipelines, feature stores, serving, MLOps |
+| Data Scientist | What does the data tell us? | Analysis, experiments, predictive models |
+| **AI Engineer** | **How do we build reliable products with foundation models?** | LLM apps, RAG, agents, evals, fine-tuning, LLMOps, guardrails |
+| Backend / Platform Engineer | How do services run reliably? | APIs, databases, queues, cloud, observability |
+
+## What job descriptions ask for
+
+<Level l="beginner" />
+
+Read a few dozen AI Engineer and GenAI Engineer job posts from product companies, banks and large IT firms and the same requirements keep appearing. They fall into eight groups, and each one has a line or station on this site:
+
+| Skill cluster | Phrases you'll see in job posts | Where to learn it |
+|---|---|---|
+| LLM fundamentals | "deep understanding of LLMs, Transformers, tokenisation, embeddings" | [Transformers](/learn/transformers/), [How LLMs work](/learn/how-llms-work/) |
+| Prompt & context engineering | "prompt engineering", "token optimisation", "structured outputs" | [LLM APIs](/learn/llm-apis/), [Prompting](/learn/prompt-engineering/), [Context](/learn/context-engineering/) |
+| RAG & vector databases | "RAG pipelines", "Pinecone, Qdrant, pgvector", "hybrid search", "re-ranking" | The [R line](/learn/rag-foundations/) |
+| Agents & tool use | "agentic workflows", "LangGraph", "function calling", "MCP" | The [A line](/learn/agent-foundations/) |
+| Fine-tuning | "LoRA/QLoRA", "PEFT", "SFT/DPO", "Hugging Face" | [Fine-tuning](/learn/fine-tuning/) |
+| Evaluation & observability | "LLM evals", "RAGAS/DeepEval", "LangSmith/Langfuse" | [Evals](/learn/evaluation/), [Observability](/learn/observability/) |
+| Production engineering | "Python/FastAPI", "Docker/Kubernetes", "AWS Bedrock / Azure OpenAI", "CI/CD" | [Full-stack apps](/learn/full-stack-apps/), the [P line](/learn/deployment-cicd/) |
+| Responsible AI & security | "guardrails", "prompt injection", "PII", "governance" | [Alignment & security](/learn/alignment-safety/), [Governance](/learn/governance/) |
+
+Extras that show up often: knowledge graphs (GraphRAG with Neo4j), document AI, speech and voice agents, AI developer tools, and some classical ML (classification, clustering) for hybrid systems.
+
+## The GenAI stack
+
+<Level l="intermediate" />
+
+A modern GenAI application has eight layers. An AI Engineer is expected to work across all of them, not just the model call in the middle.
+
+<GenAIStack caption="Read it bottom to bottom-up: every layer depends on the ones beneath it. Most bugs that look like 'the model is bad' actually live in the knowledge or prompting layer." />
+
+| Layer | What you must be able to do |
+|---|---|
+| Models | Choose between API and open-weight models on quality, latency, cost and privacy; understand context windows, tokens and sampling; know when to fine-tune |
+| Prompting & context | Write robust system prompts, few-shot examples and output schemas; assemble the right context for each request; manage token budgets |
+| Knowledge | Ingest and chunk documents, embed and index them, retrieve with hybrid search and re-ranking; query structured data with text-to-SQL |
+| Orchestration | Chains, routers, agents, tool calling, MCP, memory, human-in-the-loop, durable workflows |
+| Application | APIs (FastAPI), streaming, auth, sessions, front ends (React/Next.js, Streamlit), background jobs |
+| Quality | Golden datasets, LLM-as-judge, deterministic checks, regression gates in CI, online feedback |
+| Operations | Docker, cloud deployment, gateways, caching, tracing, cost dashboards, incident response |
+| Trust | Guardrails, injection defence, PII handling, access control, governance documentation |
+
+## From backend engineer to AI Engineer
+
+<Level l="intermediate" />
+
+If you already build backend services or integrations, you have a big head start. Most of an AI product is still APIs, data flows, authentication, queues, retries, observability and cloud deployment. What changes is how you think about correctness, speed and cost:
+
+| Backend habit | The AI-engineering adjustment |
+|---|---|
+| Same input → same output | Outputs are probabilistic. Design for variation, validate outputs, evaluate statistically. |
+| Unit tests with exact assertions | Evaluation suites with scores, thresholds, LLM judges and human review |
+| Latency in milliseconds | LLM calls take seconds. Use streaming, async, caching and background jobs. |
+| Cost per request ≈ fixed infrastructure | Cost scales with tokens. You need token budgets, routing, caching and cost metrics. |
+| Input validation for security | Plus prompt injection, data leaking through context, and tools being misused |
+| Schemas and contracts (OpenAPI) | The same skill powers tool definitions, structured outputs and MCP servers |
+| OAuth, webhooks, idempotency, rate limits | Reused directly for agent tools that call SaaS APIs |
+
+<Tip title="Use what you already know">
+If you've built API integrations, schema mappings or OpenAPI-driven services, you already understand the hardest parts of production agent tooling: well-specified tool schemas, authentication, rate limits, retries and error handling. [Project 08 (OpenAPI → MCP server)](/projects/openapi-mcp-server/) turns exactly that experience into a portfolio piece.
+</Tip>
+
+## The GenAI application lifecycle
+
+<Level l="intermediate" />
+
+Every successful AI feature goes through roughly the same eight steps. The loop matters more than any single step: you keep measuring and keep feeding failures back into your evaluation set.
+
+<Lifecycle caption="The lifecycle is a loop. Step 8 feeds new failure cases back into the eval set from step 3, which is how quality keeps improving after launch." />
+
+1. **Define the task and a success metric.** For example: "resolve 40% of first-line support tickets with a satisfaction score of at least 4.2".
+2. **Prototype with the strongest model** and a simple prompt, to prove it's possible at all.
+3. **Build an evaluation set** of 50–200 realistic cases *before* you start optimising.
+4. **Iterate** on prompt, context, retrieval and tools, measuring every change.
+5. **Harden** with structured outputs, validation, guardrails, fallbacks and timeouts.
+6. **Optimise cost and latency**: smaller models, routing, caching, fine-tuning or distillation.
+7. **Deploy** with tracing, dashboards and a way to capture user feedback.
+8. **Operate**: monitor quality and cost, grow the eval set from real failures, and re-evaluate whenever the provider updates a model.
+
+<Pitfall>
+Skipping step 3. Without an evaluation set you can't tell whether a prompt change made things better or worse; you're tuning by feel on whichever three examples you happen to try.
+</Pitfall>
+
+## Choosing a model
+
+<Level l="intermediate" />
+
+There is no single best model. Use the questions below to narrow the field, then decide with your own evaluation set.
+
+```mermaid caption="Start at the top. Most products end up using two or three models: a strong one for hard requests and a small, fast one for simple, high-volume work."
+flowchart TD
+  A[New use case] --> B{Must data stay on<br/>our infrastructure?}
+  B -- Yes --> C[Self-hosted open-weight model<br/>or private cloud deployment]
+  B -- No --> D{Complex reasoning, coding<br/>or long agent work?}
+  D -- Yes --> E[Frontier model<br/>+ reasoning mode]
+  D -- No --> F{Narrow, high-volume task?<br/>classify, extract}
+  F -- Yes --> G[Small model<br/>fine-tune or distil if needed]
+  F -- No --> H{Latency critical?<br/>voice, autocomplete}
+  H -- Yes --> I[Small, fast model<br/>+ streaming + caching]
+  H -- No --> J[Mid-size model<br/>compare 3–4 on your evals]
+```
+
+| Question | If yes |
+|---|---|
+| Does the data have to stay on our infrastructure? | A self-hosted open-weight model, or a cloud provider's private deployment with suitable terms |
+| Is it complex reasoning, coding or long multi-step agent work? | A frontier model; consider its reasoning ("thinking") mode |
+| Is it a narrow, high-volume task like classification or extraction? | A small model; fine-tune or distil if prompting falls short |
+| Is latency critical (voice, autocomplete)? | A small, fast model with streaming and prompt caching |
+| Does it need images, PDFs or audio? | A multimodal model or a specialised pipeline |
+| Do you need resilience across providers? | A gateway (LiteLLM or cloud API management) with fallbacks |
+
+Always finish with numbers: run three or four candidate models over your evaluation set and compare **quality, latency and cost per successful task**.
+
+## Core vocabulary
+
+<Level l="beginner" />
+
+You'll see these words on every page of this site. The [glossary](/glossary/) has more.
+
+| Term | Meaning |
+|---|---|
+| Token | The unit of text a model processes, about ¾ of an English word |
+| Context window | The most tokens (prompt + output) a model can handle in one call |
+| System prompt | Standing instructions that define the model's behaviour |
+| Temperature | How random the model's word choices are |
+| Embedding | A list of numbers that represents meaning |
+| RAG | Retrieval-augmented generation: look up relevant data first, then generate |
+| Tool / function calling | The model asks your code to run a function and uses the result |
+| Agent | An LLM-driven loop that decides its own steps and tool calls |
+| MCP | Model Context Protocol, a standard way to expose tools and data to AI apps |
+| Fine-tuning / LoRA | Adapting a model's weights / doing it cheaply with small adapter matrices |
+| Eval | Systematic measurement of output quality |
+| Guardrail | A check that constrains inputs, outputs or actions |
+| LLMOps | Running LLM applications in production: versioning, deployment, monitoring, cost |
+
+<Interview>
+<QA q="How is an AI Engineer different from an ML Engineer?">
+An ML Engineer mostly trains and serves models: data pipelines, training jobs, feature stores, model serving. An AI Engineer mostly *builds products on top of* existing foundation models: prompts, retrieval, tools, agents, evaluation and guardrails, plus the usual backend work. Fine-tuning is where the two overlap.
+</QA>
+<QA q="You've built a prototype that works on your test examples. What do you do next?">
+Build an evaluation set of realistic cases (including hard and adversarial ones) and a metric tied to the business goal. Only then iterate on the prompt, context and model, measuring each change, before hardening it with schemas, validation and guardrails.
+</QA>
+<QA q="How do you choose between a hosted API model and an open-weight model?">
+Start with constraints: data residency and privacy, latency and cost at expected volume. Then shortlist three or four models and decide with your own eval set, comparing quality, latency and cost per successful task, not leaderboard scores.
+</QA>
+</Interview>
+
+<Takeaways>
+- AI Engineers build reliable products with foundation models: mostly software engineering, plus evaluation and model know-how.
+- Employers look for LLM fundamentals, prompting, RAG, agents and MCP, fine-tuning, evals, production engineering and security.
+- Backend and integration experience transfers directly. The new skills are probabilistic thinking, evaluation and token economics.
+</Takeaways>

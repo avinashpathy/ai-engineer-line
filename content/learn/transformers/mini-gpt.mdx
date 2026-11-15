@@ -1,0 +1,263 @@
+---
+summary: Build a small GPT from scratch in about 150 lines of PyTorch, train it in minutes on a free GPU, then break it on purpose to see what each part does.
+---
+
+## Why build one?
+
+<Level l="intermediate" />
+
+The best way to really understand Transformers is to build one. In this lesson you'll implement a small **decoder-only Transformer**, the same architecture as GPT, that learns to generate text one character at a time. It's about 150 lines of PyTorch and trains in minutes on a free Colab or Kaggle GPU.
+
+```mermaid caption="The whole project. Every arrow is a few lines of code; the dashed box repeats 6 times."
+flowchart TD
+  A[Text file] --> B[Character tokeniser<br/>text ↔ IDs]
+  B --> C[Batches of<br/>input + shifted target]
+  C --> D[Token + position<br/>embeddings]
+  subgraph N["× 6 blocks"]
+    E[Causal self-attention] --> F[Feed-forward]
+  end
+  D --> E
+  F --> G[Linear head<br/>→ logits]
+  G --> H[Cross-entropy loss<br/>vs next character]
+  G --> I[Sampling<br/>temperature · top-k]
+```
+
+You'll need Python with PyTorch installed and any plain-text file of about 1 MB: Shakespeare is traditional, but public-domain novels, your own notes or a code base all work.
+
+## Positional encoding: the formula
+
+<Level l="advanced" />
+
+The original Transformer adds fixed position vectors built from sine and cosine waves:
+
+```
+PE(pos, 2i)   = sin( pos / 10000^(2i/d) )
+PE(pos, 2i+1) = cos( pos / 10000^(2i/d) )
+```
+
+Each pair of dimensions oscillates at a different frequency, from fast in early dimensions to very slow in late ones. That gives every position a unique "fingerprint", and makes relative offsets expressible as simple linear transformations.
+
+<Example>
+With d = 4, the two dimension pairs use frequencies 1/10000⁰ = 1 and 1/10000^0.5 = 0.01.
+
+- Position 1: [sin 1, cos 1, sin 0.01, cos 0.01] = **[0.841, 0.540, 0.010, 1.000]**
+- Position 2: [sin 2, cos 2, sin 0.02, cos 0.02] = **[0.909, −0.416, 0.020, 1.000]**
+</Example>
+
+Our mini-GPT uses **learned position embeddings** instead (like GPT-2): simpler, and just as good at short lengths. Modern LLMs use **RoPE**, which rotates query and key vectors by position-dependent angles so their dot product depends on the *relative* distance between tokens.
+
+## Step 1: data and a character tokeniser
+
+<Level l="intermediate" />
+
+```python title="minigpt.py — step 1"
+import torch, torch.nn as nn, torch.nn.functional as F
+torch.manual_seed(1337)
+
+text = open("input.txt", encoding="utf-8").read()   # ~1 MB of any text you like
+chars = sorted(set(text)); vocab_size = len(chars)
+stoi = {c: i for i, c in enumerate(chars)}; itos = {i: c for c, i in stoi.items()}
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda ids: "".join(itos[i] for i in ids)
+
+data = torch.tensor(encode(text), dtype=torch.long)
+n = int(0.9 * len(data)); train_data, val_data = data[:n], data[n:]
+
+block_size, batch_size = 256, 64        # context length, sequences per batch
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+def get_batch(split):
+    d = train_data if split == "train" else val_data
+    ix = torch.randint(len(d) - block_size, (batch_size,))
+    x = torch.stack([d[i:i + block_size] for i in ix])
+    y = torch.stack([d[i + 1:i + block_size + 1] for i in ix])   # targets = inputs shifted by one
+    return x.to(device), y.to(device)
+```
+
+<Note title="One sequence = many training examples">
+For x = "hello" and y = "ello!", the model learns five predictions at once: h→e, he→l, hel→l, hell→o, hello→!. The causal mask makes sure position *t* only sees positions up to *t*, so all five train in parallel.
+</Note>
+
+## Step 2: causal self-attention
+
+<Level l="advanced" />
+
+This is the attention you met in the [previous lesson](/learn/transformers/attention-and-transformer/), with several heads and the causal mask.
+
+```python title="minigpt.py — step 2"
+n_embd, n_head, n_layer, dropout = 384, 6, 6, 0.2
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=False)   # Q, K, V in one matmul
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.drop = nn.Dropout(dropout)
+        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape; hs = C // n_head
+        q, k, v = self.qkv(x).split(C, dim=2)
+        q, k, v = [t.view(B, T, n_head, hs).transpose(1, 2) for t in (q, k, v)]  # (B, heads, T, hs)
+        att = (q @ k.transpose(-2, -1)) / hs ** 0.5                               # (B, heads, T, T)
+        att = att.masked_fill(self.mask[:T, :T] == 0, float("-inf"))              # no peeking ahead
+        att = self.drop(F.softmax(att, dim=-1))
+        y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)                  # re-join the heads
+        return self.drop(self.proj(y))
+
+# In practice, F.scaled_dot_product_attention(q, k, v, is_causal=True) does this with FlashAttention.
+```
+
+## Step 3: the block and the full model
+
+<Level l="advanced" />
+
+```python title="minigpt.py — step 3"
+class FeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_embd, 4 * n_embd), nn.GELU(),
+                                 nn.Linear(4 * n_embd, n_embd), nn.Dropout(dropout))
+    def forward(self, x): return self.net(x)
+
+class Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(n_embd), nn.LayerNorm(n_embd)
+        self.attn, self.ff = CausalSelfAttention(), FeedForward()
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))   # communication between tokens
+        x = x + self.ff(self.ln2(x))     # computation within each token
+        return x
+
+class MiniGPT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.tok_emb = nn.Embedding(vocab_size, n_embd)
+        self.pos_emb = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block() for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.head = nn.Linear(n_embd, vocab_size, bias=False)
+        self.head.weight = self.tok_emb.weight          # weight tying: fewer params, often better
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        x = self.tok_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device))
+        logits = self.head(self.ln_f(self.blocks(x)))   # (B, T, vocab)
+        loss = None if targets is None else F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1))
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        for _ in range(max_new_tokens):
+            logits, _ = self(idx[:, -block_size:])     # crop to the context window
+            logits = logits[:, -1, :] / temperature     # last position only
+            if top_k:
+                v, _ = torch.topk(logits, top_k); logits[logits < v[:, [-1]]] = -float("inf")
+            nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)
+            idx = torch.cat([idx, nxt], dim=1)
+        return idx
+
+model = MiniGPT().to(device)
+print(sum(p.numel() for p in model.parameters()) / 1e6, "M parameters")   # ~10.7M
+```
+
+## Step 4: train it
+
+<Level l="intermediate" />
+
+```python title="minigpt.py — step 4"
+opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.1)
+
+@torch.no_grad()
+def estimate_loss(iters=100):
+    model.eval(); out = {}
+    for split in ("train", "val"):
+        out[split] = torch.stack([model(*get_batch(split))[1] for _ in range(iters)]).mean().item()
+    model.train(); return out
+
+for step in range(5000):
+    if step % 500 == 0: print(step, estimate_loss())
+    x, y = get_batch("train")
+    _, loss = model(x, y)
+    opt.zero_grad(set_to_none=True); loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
+
+start = torch.tensor([encode("ROMEO:")], device=device)
+print(decode(model.generate(start, 500, temperature=0.8, top_k=40)[0].tolist()))
+```
+
+**What to expect.** The first loss is about ln(vocab_size) ≈ 4.17, which is what uniform guessing over ~65 characters gives. After training, validation loss drops to around 1.5 and the output looks like plausible (if nonsensical) Shakespeare: real character names, line breaks, archaic words. That's a language model learning structure purely from next-token prediction.
+
+<Pitfall>
+If train loss keeps falling but validation loss starts rising, the model is memorising your file (overfitting). Stop earlier, increase dropout, or use more text.
+</Pitfall>
+
+## Step 5: break it on purpose
+
+<Level l="intermediate" />
+
+Change one thing at a time and watch what happens. These experiments make each component's job concrete.
+
+| Experiment | What you'll see |
+|---|---|
+| Remove the causal mask | Training loss collapses toward 0 because the model "cheats" by reading the answer; generation becomes garbage |
+| Remove positional embeddings | Much worse loss: the model can't tell word order |
+| 1 layer vs 6 layers | Depth improves loss and coherence |
+| 1 head vs 6 heads (same width) | Multiple heads usually help |
+| Remove residual connections | Training becomes unstable or much slower |
+| Temperature 0.3 vs 1.5 | Repetitive text vs chaotic text |
+| Swap characters for a BPE tokeniser (`tiktoken`) | Fewer, more meaningful tokens and a longer effective context |
+
+## From mini-GPT to real LLMs
+
+<Level l="advanced" />
+
+Production LLMs use the same skeleton. Almost every difference is about scale and efficiency:
+
+| Aspect | Your mini-GPT | Production LLM |
+|---|---|---|
+| Parameters | ~10M | 1B to over 1T |
+| Tokeniser | Characters (65) | Byte-level BPE (100k–250k tokens) |
+| Context | 256 | 8k to 1M+ |
+| Positions | Learned absolute | RoPE, plus scaling for long context |
+| Norm / activation | LayerNorm / GELU | RMSNorm / SwiGLU |
+| Attention | Full multi-head | GQA + FlashAttention, with a KV cache |
+| Data | 1 MB | 10+ trillion tokens, heavily filtered |
+| Training | One GPU, minutes | Thousands of GPUs, months |
+| After pre-training | Nothing | Instruction tuning, preference alignment, reasoning RL |
+
+### Attention variants worth knowing
+
+| Variant | Idea | Benefit |
+|---|---|---|
+| Multi-Query Attention (MQA) | All heads share one K and V | Much smaller KV cache, faster decoding |
+| Grouped-Query Attention (GQA) | Groups of heads share K and V | Quality close to full attention, cache close to MQA (Llama 2/3) |
+| Multi-head Latent Attention (MLA) | Compress K and V into a small latent | Very small cache (DeepSeek) |
+| FlashAttention | Tiled, fused, memory-aware exact attention | 2–4× faster, memory linear in sequence length |
+| Sliding-window attention | Each token attends to the last *w* tokens | Long sequences at linear cost (Mistral) |
+| Sparse / linear attention | Approximate attention patterns | Long-context research |
+
+<Example title="Worked example: why GQA matters">
+The KV cache per token = 2 (K and V) × layers × KV heads × head size × bytes per number. For a 32-layer model with head size 128 in fp16 (2 bytes):
+
+- **32 KV heads** (full attention): 2·32·32·128·2 = 524 KB per token, so a 32k-token context needs about **17 GB**.
+- **8 KV heads** (GQA): 131 KB per token, about **4.3 GB**.
+
+Four times as many users fit on the same GPU. That's why serving costs, not just model quality, drive architecture choices.
+</Example>
+
+<Interview>
+<QA q="Why does removing the causal mask make training loss drop to nearly zero?">
+Without the mask each position can attend to the very token it's supposed to predict, so the model copies the answer instead of learning to predict it. At generation time there's no future to copy, so the output is garbage.
+</QA>
+<QA q="What is the KV cache and why does it matter?">
+During generation, the keys and values of earlier tokens don't change, so they're stored instead of recomputed for every new token. It makes generation fast, but it uses a lot of GPU memory per token per user, which is why GQA, MQA and MLA exist.
+</QA>
+</Interview>
+
+<Takeaways>
+- A GPT is: token + position embeddings → N × (causal attention + feed-forward, with residuals and layer norm) → linear head.
+- Next-token prediction on shifted sequences trains every position in parallel.
+- Building and then breaking a mini-GPT makes each component's role concrete.
+</Takeaways>

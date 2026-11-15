@@ -1,0 +1,163 @@
+---
+summary: The idea that changed AI. Why attention was invented, how queries, keys and values work (with a calculation you can do by hand), and what's inside a Transformer block.
+---
+
+## The bottleneck problem
+
+<Level l="beginner" />
+
+Early neural translation used an **encoder–decoder RNN**. The encoder read the whole source sentence and squeezed it into *one* fixed-size vector; the decoder then generated the translation from that single vector. For long sentences, cramming everything into one vector lost information, and quality collapsed beyond about 20 words.
+
+## Attention: look back at the relevant parts
+
+<Level l="beginner" />
+
+**Attention** (Bahdanau et al., 2014) lets the decoder, at every step, look back at *all* the encoder's states and focus on the most relevant ones. When translating "the black cat" into French, at the moment the model produces "chat" it attends mostly to "cat".
+
+<Analogy>
+When you answer an exam question about chapter 5, you don't recall the whole textbook equally. You flip to the relevant pages and focus there. Attention is a learned, soft version of "flip to the relevant pages".
+</Analogy>
+
+## Self-attention
+
+<Level l="beginner" />
+
+In **self-attention**, every token in a sequence looks at every other token *in the same sequence* to build a context-aware version of itself.
+
+Take the sentence: "The animal didn't cross the street because **it** was too tired." To understand "it", the model should attend strongly to "animal". Change "tired" to "wide" and "it" should attend to "street" instead. Self-attention learns to do this from data.
+
+<AttentionMatrix caption="Each row shows where one token is looking. The highlighted row is 'it': most of its attention (0.72) goes to 'animal'. The grey triangle is the causal mask used in GPT-style models: no token can look at words that come after it." />
+
+## Queries, keys and values
+
+<Level l="intermediate" />
+
+Each token's embedding is turned into three different vectors by three learned weight matrices:
+
+- **Query (Q):** "what am I looking for?"
+- **Key (K):** "what do I contain, or offer?"
+- **Value (V):** "the information I pass on if I'm selected."
+
+<Analogy title="Analogy: a library search">
+Your **query** is what you type into the library catalogue. Every book has a **key**: its catalogue entry. You compare your query with every key to get relevance scores, then read the **values** (the books' contents), paying more attention to the most relevant ones.
+</Analogy>
+
+<QKV caption="Self-attention for one token. The same embedding is projected three ways. Its query is compared with every token's key; softmax turns the scores into weights; the output is the weighted blend of every token's value." />
+
+### Scaled dot-product attention
+
+The whole mechanism fits in one formula:
+
+```
+Attention(Q, K, V) = softmax( Q·Kᵀ / √dₖ ) · V
+```
+
+1. **Scores = Q·Kᵀ**: the dot product of each query with each key measures similarity.
+2. **Divide by √dₖ** (the square root of the key length): this stops scores from growing with the vector size, which would push softmax into regions where gradients vanish.
+3. **Softmax each row**: turns scores into attention weights that sum to 1.
+4. **Weighted sum of values**: produces the new representation of each token.
+
+<Example title="Worked example: attention by hand">
+Three tokens with 2-D queries, keys and values, so dₖ = 2 and √dₖ ≈ 1.41.
+
+- Query for token 1: **Q = [1, 0]**. Keys: K₁ = [1, 0], K₂ = [0, 1], K₃ = [1, 1].
+- Dot products: Q·K₁ = 1, Q·K₂ = 0, Q·K₃ = 1 → scores **[1, 0, 1]** → scaled **[0.71, 0, 0.71]**.
+- Softmax: e^0.71 = 2.03 and e^0 = 1, so weights = [2.03, 1, 2.03] / 5.06 = **[0.40, 0.20, 0.40]**.
+- Values: V₁ = [10, 0], V₂ = [0, 10], V₃ = [5, 5].
+- Output = 0.4·[10, 0] + 0.2·[0, 10] + 0.4·[5, 5] = **[6, 4]**.
+
+Token 1's new representation is mostly a blend of tokens 1 and 3, the two whose keys matched its query.
+</Example>
+
+The same calculation in PyTorch:
+
+```python title="attention.py"
+import math, torch
+import torch.nn.functional as F
+
+def attention(Q, K, V, mask=None):
+    scores = Q @ K.transpose(-2, -1) / math.sqrt(Q.size(-1))
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float("-inf"))
+    weights = F.softmax(scores, dim=-1)
+    return weights @ V, weights
+
+Q = torch.tensor([[1., 0.]])
+K = torch.tensor([[1., 0.], [0., 1.], [1., 1.]])
+V = torch.tensor([[10., 0.], [0., 10.], [5., 5.]])
+out, w = attention(Q, K, V)
+print(w.round(decimals=2), out)   # tensor([[0.40, 0.20, 0.40]]) tensor([[6., 4.]])
+```
+
+### Multi-head attention
+
+One attention operation captures one kind of relationship. **Multi-head attention** runs *h* attentions in parallel (12 heads, for example), each with its own Q/K/V projections, then concatenates and projects the results. Different heads specialise: one tracks grammar (subject → verb), another tracks what pronouns refer to ("it" → "animal"), another looks at nearby words.
+
+## The Transformer
+
+<Level l="intermediate" />
+
+The 2017 paper *Attention Is All You Need* dropped recurrence entirely and built everything from attention and feed-forward layers. Because every token is processed in parallel, Transformers train massively faster on GPUs, which is what made today's enormous models possible.
+
+<TransformerBlock caption="A decoder-only Transformer, the design behind GPT, Claude and Llama. Read it bottom to top. The dashed box is one block; real models stack 12 to over 100 of them. The dashed grey lines are residual connections that carry the input around each sub-layer." />
+
+### What's inside one block
+
+1. **Token embeddings.** A lookup table from token ID to vector (768 numbers, say).
+2. **Positional encoding.** Attention has no sense of order, so position information is added. The original paper used fixed sine and cosine waves; modern LLMs use learned positions or **RoPE** (rotary position embeddings), which cope better with long contexts.
+3. **Multi-head self-attention.** Tokens exchange information.
+4. **Residual connection + layer normalisation.** `x + Attention(LayerNorm(x))` keeps gradients healthy in very deep stacks.
+5. **Feed-forward network.** Two linear layers with a GELU activation, applied to each token separately and usually 4× wider than the embedding. Much of the model's "knowledge" is thought to live here.
+6. **Another residual + layer norm.**
+
+### Encoder vs decoder blocks
+
+- **Encoder block:** *bidirectional* self-attention, so each token sees the whole input. Good for understanding text.
+- **Decoder block:** *masked* (causal) self-attention, so each token sees only earlier tokens. That lets the model be trained to predict the next token without cheating. Good for generating text. In encoder–decoder models, the decoder also has **cross-attention** to the encoder's output.
+
+<Example title="Worked example: the causal mask">
+For 4 tokens the mask is lower-triangular: token 1 sees [1]; token 2 sees [1, 2]; token 3 sees [1, 2, 3]; token 4 sees all four. Future positions get a score of −∞ before softmax, so their weight becomes exactly 0. You can see this as the grey triangle in the attention diagram above.
+</Example>
+
+### Why long context is expensive
+
+Self-attention compares every token with every other token, so its cost grows with the **square** of the sequence length: O(n²). A 100,000-token context means 10 billion token pairs *per layer*. That's why long context costs more, and why techniques like FlashAttention, sliding-window attention and sparse attention exist.
+
+```python title="transformer_block.py"
+import torch
+import torch.nn as nn
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d=512, heads=8, ff=2048, drop=0.1):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d), nn.LayerNorm(d)
+        self.attn = nn.MultiheadAttention(d, heads, dropout=drop, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(d, ff), nn.GELU(), nn.Linear(ff, d), nn.Dropout(drop))
+
+    def forward(self, x, causal=True):
+        n = x.size(1)
+        mask = torch.triu(torch.ones(n, n, dtype=torch.bool), 1) if causal else None
+        h = self.ln1(x)
+        x = x + self.attn(h, h, h, attn_mask=mask)[0]   # pre-norm residual
+        return x + self.ff(self.ln2(x))
+```
+
+In the [next lesson](/learn/transformers/mini-gpt/) you'll use exactly this kind of block to build and train your own small GPT.
+
+<Interview>
+<QA q="Why divide by √dₖ in attention?">
+Dot products of d-dimensional random vectors have a variance that grows with d. Large scores push softmax into regions where its gradient is nearly zero, so training stalls. Dividing by √dₖ keeps the variance around 1.
+</QA>
+<QA q="Why do Transformers need positional encodings?">
+Self-attention treats its input as a set: it's permutation-invariant. Without position information, "dog bites man" and "man bites dog" would look identical to the model.
+</QA>
+<QA q="Why did Transformers replace RNNs?">
+They train in parallel across all tokens instead of one step at a time, they give every pair of tokens a direct path (no information fading over distance), and they keep improving smoothly as you add data and compute.
+</QA>
+</Interview>
+
+<Takeaways>
+- Attention lets a model focus on the relevant parts of its input instead of squeezing everything into one vector.
+- Self-attention = softmax(Q·Kᵀ/√dₖ)·V. Queries are compared with keys, and the weights mix the values.
+- A Transformer block is attention + feed-forward, each wrapped in a residual connection and layer norm, stacked many times. Decoders use a causal mask, which is how GPT-style models generate text.
+</Takeaways>

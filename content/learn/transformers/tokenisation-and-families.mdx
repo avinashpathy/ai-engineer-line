@@ -1,0 +1,155 @@
+---
+summary: How tokenisers split text (and why it affects cost and language support), plus the three Transformer families and when to use each.
+---
+
+## Tokenisation
+
+<Level l="beginner" />
+
+A **tokeniser** converts text into the integer IDs a model understands. The big decision is what unit to split on:
+
+| Level | Vocabulary size | Problem |
+|---|---|---|
+| Word | Huge (millions) | Unknown words, typos, word forms like "unhappiness" |
+| Character | Tiny (hundreds) | Very long sequences, and little meaning per unit |
+| **Sub-word** | **30k–200k** | **The sweet spot used by all modern models** |
+
+Sub-word tokenisers keep frequent words whole and split rare words into meaningful pieces: "tokenization" → ["token", "ization"]; "unbelievably" → ["un", "believ", "ably"]. No word is ever "unknown".
+
+### Byte-Pair Encoding (BPE): GPT family, Llama
+
+1. Start with characters (or raw bytes) as the vocabulary.
+2. Count every adjacent pair in the training text.
+3. Merge the most frequent pair into a new token.
+4. Repeat until the vocabulary reaches the target size.
+
+<BPEMerges caption="BPE applied to the word 'lowest', which never appeared in training. Because 'est' and 'low' were learned as frequent pieces, the new word splits into two meaningful tokens." />
+
+<Example title="Worked example: BPE merges">
+The training text contains: low ×5, lower ×2, newest ×6, widest ×3.
+
+The most frequent pair is "e"+"s" (in newest and widest: 9 times), so merge it into "es". Then "es"+"t" (9) → "est". Then "l"+"o" (7) → "lo", then "lo"+"w" → "low", and so on.
+
+Now "lowest", which was never seen, tokenises as ["low", "est"].
+</Example>
+
+**Byte-level BPE** (GPT-2 onwards) works on raw bytes, so it can encode any text, emoji or language.
+
+### WordPiece: BERT
+
+Similar to BPE, but chooses the merges that most increase the likelihood of the training data. Pieces that continue a word are marked with `##`: "playing" → ["play", "##ing"].
+
+### Unigram / SentencePiece: T5 and many multilingual models
+
+Starts with a large vocabulary and prunes the tokens that contribute least. SentencePiece treats the space as a symbol (`▁`), so it works for languages written without spaces (Japanese, Chinese) and can always reconstruct the original text exactly.
+
+```python title="compare_tokenisers.py"
+from transformers import AutoTokenizer
+
+for name in ["bert-base-uncased", "gpt2", "t5-small"]:
+    tok = AutoTokenizer.from_pretrained(name)
+    print(name, tok.tokenize("Tokenization is unbelievably useful!"))
+
+# bert: ['token', '##ization', 'is', 'un', '##bel', '##ie', '##va', '##bly', 'useful', '!']
+# gpt2: ['Token', 'ization', 'Ġis', 'Ġunbelievably', 'Ġuseful', '!']      (Ġ = leading space)
+# t5:   ['▁To', 'ken', 'ization', '▁is', '▁un', 'believ', 'ably', '▁useful', '!']
+
+ids = tok("Hello world", return_tensors="pt")   # input_ids + attention_mask
+```
+
+<Tip title="Why tokenisation matters in practice">
+LLM pricing, context limits and latency are all measured in tokens (about 0.75 English words per token). Indian languages often take 3–5× more tokens per word in English-centric tokenisers, which makes them costlier and slower. Numbers and code also tokenise oddly, which is one reason LLMs struggle with arithmetic.
+</Tip>
+
+### Special tokens
+
+`[CLS]` (BERT's whole-sequence summary), `[SEP]` (separator), `[PAD]` (padding to equal length, ignored through the attention mask), `[MASK]` (for masked language modelling), `<bos>`/`<eos>` (beginning and end of sequence), and **chat-template tokens** that mark system, user and assistant turns in chat models.
+
+## The three Transformer families
+
+<Level l="intermediate" />
+
+<TransformerFamilies caption="The same building block arranged three ways. Today's chat LLMs are decoder-only, but encoder-only models still dominate embeddings and fast classification." />
+
+| Family | Attention | Pre-training objective | Examples | Best at |
+|---|---|---|---|---|
+| Encoder-only | Bidirectional | Masked language modelling | BERT, RoBERTa, DeBERTa, DistilBERT | Classification, NER, embeddings, search |
+| Decoder-only | Causal (left to right) | Next-token prediction | GPT series, Llama, Mistral, Claude, Gemma, Qwen | Generation, chat, reasoning, code |
+| Encoder–decoder | Bidirectional encoder + causal decoder with cross-attention | Span corruption / denoising | T5, BART, mT5, Whisper | Translation, summarisation, speech-to-text |
+
+### Encoder-only: BERT
+
+BERT's pre-training tasks:
+
+- **Masked language modelling (MLM):** hide 15% of tokens at random and predict them using context from *both* sides. "The [MASK] sat on the mat" → "cat".
+- **Next sentence prediction:** in the original BERT; later dropped by RoBERTa as unhelpful.
+
+For classification, a small head on the final `[CLS]` vector is fine-tuned. Variants: **RoBERTa** (more data, no NSP, dynamic masking), **DistilBERT** (40% smaller and 60% faster through distillation, keeping about 97% of the performance), **DeBERTa** (disentangled attention, top accuracy), **ModernBERT** (2024: longer context, faster).
+
+### Decoder-only: GPT-style
+
+Trained to predict the next token on vast amounts of text. Generation is *autoregressive*: predict a token, append it, predict the next. Scaling these models revealed abilities nobody explicitly trained, like few-shot learning, reasoning and coding, which made decoder-only the dominant design for LLMs.
+
+### Encoder–decoder: T5 and BART
+
+**T5** (Text-to-Text Transfer Transformer) frames every task as text in, text out: "translate English to German: …", "summarize: …". **BART** is trained to reconstruct corrupted text, which makes it excellent at summarisation.
+
+```python title="pipelines.py"
+from transformers import pipeline
+
+clf = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+print(clf("The delivery was late but support was fantastic."))
+
+ner = pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
+print(ner("Sundar Pichai announced Google's new office in Bengaluru on Monday."))
+
+gen = pipeline("text-generation", model="gpt2")
+print(gen("Machine learning is", max_new_tokens=20)[0]["generated_text"])
+```
+
+## Fine-tuning BERT for classification
+
+<Level l="advanced" />
+
+A complete fine-tune of DistilBERT on movie reviews. Expect about 90–92% accuracy in roughly 15 minutes on a free T4 GPU.
+
+```python title="finetune_distilbert.py"
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+import numpy as np, evaluate
+
+ds = load_dataset("imdb")
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+ds = ds.map(lambda b: tok(b["text"], truncation=True, max_length=256), batched=True)
+model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=2)
+
+acc = evaluate.load("accuracy")
+def metrics(p): return acc.compute(predictions=np.argmax(p.predictions, -1), references=p.label_ids)
+
+args = TrainingArguments("out", eval_strategy="epoch", learning_rate=2e-5,
+                         per_device_train_batch_size=16, num_train_epochs=2,
+                         weight_decay=0.01, fp16=True, save_strategy="epoch",
+                         load_best_model_at_end=True)
+trainer = Trainer(model=model, args=args, tokenizer=tok, compute_metrics=metrics,
+                  train_dataset=ds["train"].shuffle(seed=0).select(range(10000)),
+                  eval_dataset=ds["test"].shuffle(seed=0).select(range(2000)))
+trainer.train()
+```
+
+<Interview>
+<QA q="When would you choose BERT over GPT?">
+For classification, NER, embeddings and retrieval where latency and cost matter. An encoder of 66–350M parameters fine-tuned on your labels often beats prompting a huge LLM, at a fraction of the price.
+</QA>
+<QA q="What's the attention mask for?">
+It tells the model which positions are real tokens and which are padding (or, for causal masking, future tokens), so those positions get zero attention weight.
+</QA>
+<QA q="Why might the same prompt cost more in Hindi than in English?">
+English-centric tokenisers split non-English text into more, smaller tokens. More tokens means higher cost, higher latency and less room in the context window.
+</QA>
+</Interview>
+
+<Takeaways>
+- Modern models use sub-word tokenisers (BPE, WordPiece, SentencePiece), so no word is ever unknown, but token counts vary a lot by language.
+- Encoder-only models understand, decoder-only models generate, encoder–decoder models transform one sequence into another.
+- For narrow, high-volume tasks, a small fine-tuned encoder is often cheaper and better than a giant LLM.
+</Takeaways>

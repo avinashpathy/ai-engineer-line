@@ -1,0 +1,167 @@
+---
+order: 10
+title: Voice AI Receptionist
+tagline: A phone and browser voice agent for a clinic that answers questions, books and reschedules appointments through tools, and keeps the whole loop under one second.
+level: Advanced
+weeks: 2–3 weeks
+lines: [l, a, p]
+stack: [Python, WebSockets, Streaming speech-to-text (Whisper / managed STT), LLM API, Streaming TTS, Voice activity detection, Telephony (Twilio or similar), Postgres]
+skills: [Speech AI, Streaming pipelines, Latency budgeting, Turn-taking and barge-in, Tool calling, Voice-specific evals]
+---
+
+## What you'll build
+
+"Meera", a receptionist for a fictional dental clinic. Patients call a phone number (or click "Talk" in the browser). Meera answers questions about hours, location and treatments, **books, reschedules and cancels appointments** through tools, reads back details for confirmation, and hands over to staff when needed. She speaks English and Hindi and can be interrupted mid-sentence like a person.
+
+Voice is where AI engineering gets physical: every 100 ms of delay is audible. This project proves you can design **streaming systems against a latency budget**.
+
+<Note title="Before you start">
+Finish [Multimodal & voice AI](/learn/multimodal-voice/), [LLM APIs](/learn/llm-apis/) and [Agent foundations](/learn/agent-foundations/). Time: 15–20 hours.
+</Note>
+
+### Success criteria
+
+| Metric | Target |
+|---|---|
+| Voice-to-voice latency (end of speech → first audio) | p50 ≤ 800 ms, p95 ≤ 1.5 s |
+| Booking task success on 30 scripted calls | ≥ 90% |
+| Word error rate on clinic vocabulary | ≤ 10% |
+| Bookings made without read-back confirmation | 0 |
+| Barge-in: agent stops talking when interrupted | ≤ 300 ms |
+
+## Architecture
+
+```mermaid caption="Everything streams. Speech recognition, the model and speech synthesis overlap, so Meera starts talking before she has finished 'thinking'."
+flowchart TD
+  P[Caller<br/>phone or browser] <-- audio frames --> GW[Media gateway<br/>WebSocket]
+  GW --> VAD[Voice activity<br/>detection]
+  VAD --> STT[Streaming STT<br/>partial + final text]
+  STT --> AG[Dialogue agent<br/>LLM + state]
+  AG <--> T[Tools<br/>find_slots · book ·<br/>reschedule · cancel ·<br/>handoff]
+  T <--> DB[(Appointments DB)]
+  AG -- sentence by sentence --> TTS[Streaming TTS]
+  TTS --> GW
+  VAD -. caller speaks .-> BI[Barge-in:<br/>stop TTS, flush audio]
+  BI --> GW
+  AG -.-> OBS[(Latency traces<br/>+ transcripts)]
+```
+
+## The latency budget
+
+Write the budget down first. It drives every design decision.
+
+| Stage | Budget | How to hit it |
+|---|---|---|
+| End-of-speech detection | 200–300 ms | VAD with a short silence threshold; tune per language |
+| Final transcript | 100–200 ms | Streaming STT; you already have partials |
+| LLM time to first token | 250–400 ms | Small fast model, prompt caching, short system prompt |
+| First TTS audio | 100–200 ms | Streaming TTS; send the first *sentence*, not the whole reply |
+| Network | 50–100 ms | Host near users; keep one WebSocket open |
+| **Total** | **≈ 700 ms–1.2 s** | |
+
+<Tip title="Stream the first sentence">
+Don't wait for the full LLM reply. Split the token stream on sentence boundaries and send each sentence to TTS as soon as it's complete. The caller hears "Sure, let me check Thursday for you." while the model is still writing the rest.
+</Tip>
+
+## Milestones
+
+### 1. Clinic data and tools
+
+Create tables for `providers`, `slots` and `appointments`, plus a small FAQ (hours, address, fees, insurance, cancellation policy). Then expose tools:
+
+```python title="app/tools.py"
+from datetime import date, datetime
+
+def find_slots(treatment: str, preferred_date: date, part_of_day: str = "any") -> list[dict]:
+    """Return up to 3 free slots for a treatment on or after preferred_date."""
+    ...
+
+def book(slot_id: str, patient_name: str, phone: str, confirmed: bool) -> dict:
+    """Book a slot. Only call with confirmed=True after reading the details back to the caller."""
+    if not confirmed:
+        return {"error": "Read the date, time and name back to the caller and get a yes first."}
+    ...
+
+def reschedule(appointment_id: str, new_slot_id: str, confirmed: bool) -> dict: ...
+def cancel(appointment_id: str, confirmed: bool) -> dict: ...
+def handoff(reason: str, summary: str) -> dict:
+    """Transfer to clinic staff with a one-paragraph summary."""
+    ...
+```
+
+Identify existing appointments by **the caller's phone number plus their date of birth**, not by anything the model invents, and never read out another patient's details.
+
+### 2. Speech-to-text and text-to-speech
+
+Start in the browser with a WebSocket that streams 16 kHz mono PCM frames. Use a streaming STT engine (a hosted streaming API, or a Whisper variant served with a streaming wrapper) and a streaming TTS voice. Add a **custom vocabulary** of treatment names ("root canal", "scaling", "aligners") and doctors' names, and measure word error rate on 50 recorded test phrases before and after.
+
+### 3. Turn-taking and barge-in
+
+```python title="app/turns.py"
+async def on_vad_event(event, call):
+    if event == "speech_start" and call.agent_speaking:
+        call.tts.stop()                  # stop synthesis
+        await call.gateway.clear_audio() # flush audio already queued to the caller
+        call.agent_speaking = False
+        call.history.append({"role": "assistant", "content": call.spoken_so_far + " [interrupted]"})
+    elif event == "speech_end":
+        text = await call.stt.final()
+        if text.strip():
+            await respond(call, text)
+```
+
+Record what was actually spoken before the interruption, so the model knows the caller didn't hear the rest.
+
+### 4. The dialogue agent
+
+```text title="prompts/meera.txt"
+You are Meera, the receptionist at Smile Dental Clinic. You are speaking on the phone.
+- Speak in short sentences (max 2 per turn). No lists, no markdown, no URLs.
+- Say numbers and times the way people say them: "Thursday the 14th at 4:30 in the afternoon".
+- Before booking, rescheduling or cancelling, read the details back and wait for a clear yes.
+- If you didn't understand, ask once to repeat; after two failures, offer to transfer to staff.
+- Medical questions beyond fees and procedures: don't advise; offer a call-back from a dentist.
+- Reply in the caller's language (English or Hindi).
+```
+
+Keep dialogue state (caller phone, intent, chosen slot, confirmation status) in the call object, and inject it as "Known facts" every turn. Voice prompts must be *short*: every extra token costs time-to-first-token.
+
+### 5. Telephony
+
+Connect a phone number from a telephony provider to your media gateway with its bidirectional media-stream WebSocket. Convert between the provider's 8 kHz μ-law audio and your engines' formats. Verify the provider's webhook signatures so nobody can inject fake calls.
+
+## Evaluation plan
+
+| What | How |
+|---|---|
+| Latency | Log timestamps at every stage per turn; chart p50/p95 of voice-to-voice |
+| Task success | 30 scripted calls (book, reschedule, cancel, FAQ, handoff), run with a TTS "caller" and checked against the database |
+| Understanding | Word error rate on 50 recorded phrases with clinic vocabulary, in both languages |
+| Safety | Confirmation-before-action rate (must be 100%); no other patient's data ever spoken |
+| Robustness | Calls with background noise, accents, interruptions and long pauses |
+
+## Security & privacy checklist
+
+- [ ] Telephony webhooks verified by signature; media WebSocket authenticated per call.
+- [ ] Patient identity checked with phone number + date of birth before revealing or changing appointments.
+- [ ] Every booking change confirmed by read-back and logged with the call ID.
+- [ ] Recordings and transcripts are health-adjacent personal data: get consent at the start of the call, encrypt at rest, and set a short retention period.
+- [ ] No medical advice; clear hand-off path to staff.
+- [ ] Rate limits per caller number to stop abuse; spending caps on STT, LLM and TTS providers.
+
+## Deploy it
+
+Run the media gateway and agent as one container on a host close to your callers (latency!), with managed Postgres. Keep WebSocket connections sticky to one instance per call. Dashboards: calls per hour, voice-to-voice latency, task success, hand-off rate and cost per minute.
+
+## Stretch goals
+
+- Outbound reminder calls the day before an appointment, with "press 1 to confirm".
+- A speech-to-speech model and a latency comparison against your cascaded pipeline.
+- WhatsApp or SMS confirmations after booking.
+- Combine with [Project 05](/projects/support-chatbot/) as a voice channel.
+
+## Show it off
+
+README: the latency budget and how you met it (with a chart), the architecture, the evaluation results, a recorded demo call, and the privacy design.
+
+**Interview talking points:** where the milliseconds go in a voice pipeline; how barge-in works; why confirmations matter more in voice than in text; how you'd scale to 200 simultaneous calls.

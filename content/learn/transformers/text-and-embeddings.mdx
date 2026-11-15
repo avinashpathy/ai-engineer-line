@@ -1,0 +1,189 @@
+---
+summary: How computers turn language into numbers, from word counts and TF-IDF to embeddings, where similar meanings sit close together.
+---
+
+## What is NLP?
+
+<Level l="beginner" />
+
+**Natural Language Processing (NLP)** teaches computers to work with human language: to classify it, pull information out of it, translate it, summarise it, answer questions about it, and generate it. Almost everything an AI Engineer builds is an NLP system underneath.
+
+| Task | Example |
+|---|---|
+| Text classification | Sentiment, spam, intent detection, routing support tickets |
+| Named entity recognition (NER) | Find people, organisations, dates, amounts |
+| Question answering | Answer a question from a passage |
+| Summarisation | Condense a long document |
+| Machine translation | English → Kannada |
+| Text generation | Chatbots, drafting, code |
+| Semantic search | Find documents by *meaning*, not exact keywords |
+
+Language is hard for machines because it's full of ambiguity ("I saw her duck"), synonyms, sarcasm ("great, another Monday"), context, spelling variation and code-mixing ("kal meeting hai, don't be late").
+
+## The classical preprocessing pipeline
+
+<Level l="beginner" />
+
+Before deep learning, text was cleaned heavily before being fed to a model. You'll still see these steps in older systems and in fast baselines.
+
+| Step | Example | Watch out for |
+|---|---|---|
+| Lower-casing | "Apple" → "apple" | Loses the difference between Apple Inc. and the fruit |
+| Removing noise | Strip HTML, URLs, emojis | Keep emojis for sentiment! |
+| Tokenisation | "I'm happy" → ["I", "'m", "happy"] | Splits text into units |
+| Stop-word removal | Drop "the, is, at" | Hurts tasks where "not" matters |
+| Stemming | "running, runs" → "run"; "studies" → "studi" | Crude chopping, but fast |
+| Lemmatisation | "better" → "good"; "studies" → "study" | Dictionary-based and accurate |
+
+```python title="preprocess.py"
+import re, spacy
+nlp = spacy.load("en_core_web_sm")   # first: python -m spacy download en_core_web_sm
+
+def preprocess(text):
+    text = re.sub(r"<.*?>|http\S+", " ", text.lower())
+    doc = nlp(text)
+    return [t.lemma_ for t in doc if t.is_alpha and not t.is_stop]
+
+print(preprocess("The batteries were <b>dying</b> quickly! See http://x.co"))
+# ['battery', 'die', 'quickly']
+```
+
+<Pitfall title="Modern models need far less preprocessing">
+Transformers have their own tokenisers and learn from raw text. Stop-words, casing and punctuation carry meaning they use. Heavy cleaning helps classical models (TF-IDF + logistic regression) but can *hurt* BERT or GPT. Remove only true noise like HTML and boilerplate.
+</Pitfall>
+
+## Representing text as numbers
+
+<Level l="beginner" />
+
+Models only understand numbers, so the central question of NLP is: **how do you turn text into numbers without losing its meaning?** Each method below fixes a weakness of the one before.
+
+<TextToNumbers caption="The modern pipeline in one picture: text is cut into tokens, each token gets an ID, and each ID is looked up in a table of learned vectors (embeddings). The colours show positive (blue) and negative (red) values." />
+
+### One-hot encoding
+
+Each word in a vocabulary of size *V* becomes a vector of length *V* with a single 1 in it. These vectors are huge and mostly zeros, and every pair of words is *equally different*: "cat" is as far from "kitten" as it is from "carburettor".
+
+### Bag of words
+
+Represent a whole document by counting its words, ignoring their order.
+
+<Example title="Worked example: bag of words">
+Vocabulary: `[good, movie, bad, acting, great]`
+
+- "good movie great acting" → `[1, 1, 0, 1, 1]`
+- "bad movie bad acting" → `[0, 1, 2, 1, 0]`
+
+Notice what's lost: "the movie was not good" and "the movie was good, not bad" look almost identical.
+</Example>
+
+### TF-IDF
+
+TF-IDF gives more weight to words that are frequent *in this document* but rare *across all documents*. Distinctive words matter more than common ones.
+
+```
+tf-idf(t, d) = tf(t, d) × log( N / df(t) )
+```
+
+Here `tf` is how often term *t* appears in document *d*, `N` is the number of documents, and `df` is how many documents contain *t*.
+
+<Example title="Worked example: TF-IDF">
+There are 1,000 documents. "refund" appears 3 times in a 100-word complaint and in 50 documents overall. "the" appears 6 times and in all 1,000.
+
+- tf-idf(refund) = 0.03 × log(1000/50) = 0.03 × 3.0 = **0.090**
+- tf-idf(the) = 0.06 × log(1000/1000) = 0.06 × 0 = **0**
+
+"refund" is highly informative; "the" contributes nothing.
+</Example>
+
+```python title="tfidf_baseline.py"
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+texts  = ["loved it, great acting", "terrible plot, bad acting", "great movie", "worst film ever"]
+labels = [1, 0, 1, 0]
+clf = make_pipeline(TfidfVectorizer(ngram_range=(1, 2)), LogisticRegression())
+clf.fit(texts, labels)
+print(clf.predict(["great acting but bad plot"]))
+```
+
+**N-grams** (pairs or triples of neighbouring words) capture a little word order, so "not good" becomes a single feature.
+
+<Tip>
+TF-IDF plus logistic regression is a strong, fast, explainable baseline. Always try it before reaching for a Transformer. If it gets 92% and the Transformer gets 93%, the baseline may be the better product.
+</Tip>
+
+## Word embeddings
+
+<Level l="intermediate" />
+
+**Embeddings** are dense vectors, typically 100–300 numbers for word embeddings, learned so that words used in similar contexts end up with similar vectors. The idea comes from linguistics: "You shall know a word by the company it keeps" (J.R. Firth).
+
+<EmbeddingSpace caption="A 2-D sketch of an embedding space (real ones have hundreds of dimensions). Related words cluster, and consistent directions encode relationships: the arrow from 'man' to 'king' points the same way as 'woman' to 'queen'." />
+
+### Word2Vec
+
+Word2Vec trains a shallow neural network on a made-up task:
+
+- **Skip-gram:** given a word, predict its neighbours.
+- **CBOW:** given the neighbours, predict the middle word.
+
+Nobody cares about the task itself. The learned weights *are* the embeddings. Their famous property is that vector arithmetic captures relationships: **king − man + woman ≈ queen**, and **Paris − France + India ≈ Delhi**.
+
+Other static embeddings: **GloVe** (built from global word co-occurrence counts) and **FastText** (uses character n-grams inside words, so it handles typos and words it has never seen).
+
+```python title="word2vec_demo.py"
+from gensim.models import Word2Vec
+
+sentences = [["customer", "wants", "refund"], ["refund", "processed", "today"],
+             ["customer", "requested", "return"], ["return", "and", "refund", "policy"]]
+w2v = Word2Vec(sentences, vector_size=50, window=3, min_count=1, sg=1, epochs=200)
+print(w2v.wv.most_similar("refund", topn=3))
+
+# Pre-trained vectors:
+# import gensim.downloader as api; glove = api.load("glove-wiki-gigaword-100")
+```
+
+### The limitation: one vector per word
+
+Static embeddings give "bank" the *same* vector in "river bank" and "bank loan". **Contextual embeddings** from Transformers (next lesson) produce a different vector for every occurrence, depending on the sentence around it. That was the breakthrough that made modern NLP work.
+
+## Sentence embeddings
+
+<Level l="intermediate" />
+
+For search, clustering and RAG you need **one vector per sentence or paragraph**. Sentence-Transformer models (for example `all-MiniLM-L6-v2`, `bge-base-en`, `e5`) are trained so that sentences with similar meaning get a high **cosine similarity**, even when they share no words.
+
+```python title="sentence_similarity.py"
+from sentence_transformers import SentenceTransformer, util
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+emb = model.encode([
+    "How do I reset my password?",
+    "I forgot my login credentials",
+    "What is your refund policy?",
+], normalize_embeddings=True)
+
+print(util.cos_sim(emb[0], emb[1:]))   # high for #2 (~0.6), low for #3 (~0.1)
+```
+
+"How do I reset my password?" and "I forgot my login credentials" share almost no words, yet they score as similar. This is the engine behind semantic search and the whole [RAG line](/learn/rag-foundations/).
+
+<Interview>
+<QA q="Why can heavy text preprocessing hurt a Transformer model?">
+Transformers learn from raw text with their own tokenisers. Casing, punctuation and stop-words like "not" carry meaning the model uses, so removing them throws away signal. Clean only true noise such as HTML.
+</QA>
+<QA q="What's the difference between static and contextual embeddings?">
+Static embeddings (Word2Vec, GloVe) give each word one fixed vector. Contextual embeddings from Transformers give each *occurrence* a vector that depends on the surrounding sentence, so "bank" differs in "river bank" and "bank loan".
+</QA>
+<QA q="When would you still use TF-IDF?">
+As a fast, cheap, explainable baseline for classification or keyword search, and as the keyword half of hybrid search (BM25 is a close relative). If it's nearly as good as a large model, its cost and transparency often win.
+</QA>
+</Interview>
+
+<Takeaways>
+- Classical pipeline: clean → tokenise → (stem or lemmatise) → bag of words / TF-IDF → linear model. It's a strong baseline.
+- Embeddings turn words into dense vectors where similar meaning means nearby vectors.
+- Static embeddings give one vector per word; contextual embeddings from Transformers depend on the sentence. Sentence embeddings power semantic search and RAG.
+</Takeaways>

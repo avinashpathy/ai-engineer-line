@@ -1,0 +1,239 @@
+---
+order: 3
+title: Invoice Extraction Service
+tagline: A production-style service that turns invoice PDFs and photos into validated data, auto-approves what it's sure of, and routes the rest to a human review queue that makes it smarter.
+level: Intermediate
+weeks: 2 weeks
+lines: [l, p]
+stack: [FastAPI, Vision LLM, Pydantic, Postgres, Redis + arq, pymupdf, Streamlit, Docker Compose]
+skills: [Multimodal input, Schema design, Business-rule validation, Confidence routing, Async queues, Human-in-the-loop, Field-level evals]
+---
+
+## What you'll build
+
+A service that accepts invoice PDFs and images, extracts structured fields with a **vision-capable LLM**, validates them against **business rules**, **auto-approves** high-confidence results and routes the rest to a **human review queue**. Every human correction becomes training and evaluation data.
+
+This is one of the most common real-world GenAI workloads ("document AI"), and it's an excellent showcase of engineering judgement: knowing when *not* to trust the model.
+
+<Note title="Data">
+50–100 invoices from public sample-invoice datasets (Kaggle, Hugging Face) or generated with a script, each paired with hand-labelled ground-truth JSON. Time: 10–12 hours for the core.
+</Note>
+
+### Success criteria
+
+| Metric | Target |
+|---|---|
+| Field accuracy on key fields (number, date, totals, GSTIN) | ≥ 97% |
+| Field error rate among **auto-approved** invoices | under 0.5% |
+| Straight-through processing (auto-approved share) | Report it; raise it only while errors stay low |
+| Cost and latency per page | Measured and shown on a dashboard |
+
+## Architecture
+
+```mermaid caption="Uploads return immediately; a worker does the slow model work. Corrections flow back as few-shot examples and eval data."
+flowchart TD
+  U[Upload API] --> S[(Object storage)]
+  U --> Q[[Queue · Redis]]
+  Q --> W1
+  subgraph WK[Worker]
+    direction TB
+    W1[Render pages<br/>to images] --> W2[Vision LLM<br/>→ Invoice JSON]
+    W2 --> W3[Validation rules]
+    W3 --> W4{Route}
+  end
+  W4 -- confident --> A[(auto_approved)]
+  W4 -- unsure --> RV[Review UI]
+  RV --> C[(Corrections)]
+  C -. per-vendor few-shot .-> W2
+  C -. grows .-> E[(Eval set)]
+  A --> ERP[ERP / accounting]
+```
+
+## Milestones
+
+### 1. Schema with self-reported confidence
+
+```python title="app/schemas.py"
+from datetime import date
+from typing import Optional
+from pydantic import BaseModel, Field
+
+class LineItem(BaseModel):
+    description: str
+    quantity: float
+    unit_price: float
+    amount: float
+
+class Invoice(BaseModel):
+    vendor_name: str
+    vendor_gstin: Optional[str] = Field(None, description="15-character GSTIN if present")
+    invoice_number: str
+    invoice_date: date
+    due_date: Optional[date] = None
+    currency: str = Field("INR", description="ISO code")
+    line_items: list[LineItem]
+    subtotal: float
+    tax_total: float
+    grand_total: float
+    po_number: Optional[str] = None
+    low_confidence_fields: list[str] = Field(default_factory=list,
+        description="fields that were unclear, handwritten, cut off or ambiguous")
+```
+
+`low_confidence_fields` is a cheap self-assessed confidence signal. Combine it with validation results; never rely on it alone.
+
+### 2. Render pages and call the vision model
+
+```python title="app/extract.py"
+import base64, pymupdf
+
+def pdf_to_images(path: str, dpi: int = 150, max_pages: int = 4) -> list[str]:
+    doc = pymupdf.open(path)
+    return [base64.b64encode(p.get_pixmap(dpi=dpi).tobytes("png")).decode() for p in doc][:max_pages]
+
+EXTRACT = """Extract the invoice into the schema. Rules:
+- Copy identifiers (invoice number, GSTIN, PO) exactly, character for character.
+- Dates as YYYY-MM-DD. Amounts as plain numbers without currency symbols or commas.
+- If a field is not present use null. List unclear fields in low_confidence_fields.
+- Do not compute totals yourself; copy what is printed."""
+
+def extract_invoice(images_b64: list[str]):
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b}}
+               for b in images_b64]
+    content.append({"type": "text", "text": EXTRACT})
+    resp = client.messages.create(
+        model=VISION_MODEL, max_tokens=3000,
+        tools=[{"name": "record_invoice", "description": "Record extracted invoice data.",
+                "input_schema": Invoice.model_json_schema()}],
+        tool_choice={"type": "tool", "name": "record_invoice"},     # forces schema-shaped output
+        messages=[{"role": "user", "content": content}])
+    raw = next(b.input for b in resp.content if b.type == "tool_use")
+    return Invoice.model_validate(raw), resp.usage
+```
+
+<Tip title="Text layer first">
+Many PDFs are digital and already have a text layer. Sending the extracted text (plus the page image for layout) is often cheaper and more accurate on identifiers than an image alone. Try both and measure.
+</Tip>
+
+### 3. Validation rules
+
+```python title="app/validate.py"
+import re
+GSTIN_RE = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+
+def validate(inv, known_pos: set[str], vendor_master: dict) -> tuple[list[str], list[str]]:
+    errors, warnings = [], []
+    li_sum = round(sum(li.amount for li in inv.line_items), 2)
+    if abs(li_sum - inv.subtotal) > 1.0:
+        errors.append(f"line items sum {li_sum} != subtotal {inv.subtotal}")
+    for li in inv.line_items:
+        if abs(li.quantity * li.unit_price - li.amount) > 1.0:
+            warnings.append(f"qty×price != amount for '{li.description[:30]}'")
+    if abs(inv.subtotal + inv.tax_total - inv.grand_total) > 1.0:
+        errors.append("subtotal + tax != grand total")
+    if inv.vendor_gstin and not GSTIN_RE.match(inv.vendor_gstin):
+        errors.append("GSTIN format invalid")
+    if inv.due_date and inv.due_date < inv.invoice_date:
+        errors.append("due date before invoice date")
+    if inv.po_number and inv.po_number not in known_pos:
+        warnings.append("PO number not found in ERP")
+    if inv.vendor_gstin in vendor_master and vendor_master[inv.vendor_gstin].lower() not in inv.vendor_name.lower():
+        warnings.append("vendor name does not match vendor master for this GSTIN")
+    return errors, warnings
+```
+
+### 4. Confidence routing
+
+```python title="app/route.py"
+def route(inv, errors, warnings, amount_threshold=200_000):
+    if errors:                     return "needs_review", "validation errors"
+    if inv.low_confidence_fields:  return "needs_review", f"unclear: {inv.low_confidence_fields}"
+    if inv.grand_total > amount_threshold: return "needs_review", "high-value invoice policy"
+    if warnings:                   return "needs_review", "warnings present"
+    return "auto_approved", "all checks passed"
+```
+
+Start conservative, with most invoices reviewed. Loosen routing only when the measured error rate among auto-approved invoices stays below target.
+
+### 5. Async processing with a queue
+
+```python title="app/worker.py"
+async def process_document(ctx, doc_id: str):
+    db = ctx["db"]; doc = await db.get_document(doc_id)
+    try:
+        inv, usage = extract_invoice(pdf_to_images(doc.path))
+        errors, warnings = validate(inv, await db.known_pos(), await db.vendor_master())
+        status, reason = route(inv, errors, warnings)
+        await db.save_extraction(doc_id, inv.model_dump(mode="json"), errors, warnings,
+                                 status, reason, usage.input_tokens, usage.output_tokens)
+    except Exception as e:
+        await db.mark_failed(doc_id, str(e))   # shows up on a failed-documents dashboard
+        raise
+```
+
+The upload endpoint stores the file, inserts a `documents` row with status `queued`, enqueues the job and returns the ID immediately. Clients poll `GET /documents/{id}` or receive a webhook.
+
+### 6. Review UI and corrections
+
+```python title="review_app.py"
+import streamlit as st
+
+doc = fetch_next_for_review()
+st.image(doc["page_images"][0], caption=doc["filename"])
+if doc["errors"]:   st.error("\n".join(doc["errors"]))
+if doc["warnings"]: st.warning("\n".join(doc["warnings"]))
+edited = st.data_editor(doc["extraction"]["line_items"], num_rows="dynamic")
+fields = {k: st.text_input(k, str(v)) for k, v in doc["extraction"].items() if k != "line_items"}
+if st.button("Approve with corrections"):
+    save_correction(doc["id"], {**fields, "line_items": edited}, reviewer=st.session_state.user)
+```
+
+Store both the original extraction and the corrected version. Each correction is a labelled example: it enriches the eval set, can be retrieved as a few-shot example for the same vendor, and becomes future fine-tuning data.
+
+### 7. Improve with per-vendor few-shot examples
+
+For vendors with past corrections, add one corrected example (that vendor's previous invoice text plus the correct JSON) to the prompt. Measure the accuracy gain on that vendor's held-out invoices. This is the *dynamic few-shot* pattern from [Prompt engineering](/learn/prompt-engineering/), driven by human feedback.
+
+## Evaluation plan
+
+```python title="evals/fields.py"
+FIELDS = ("vendor_name", "invoice_number", "invoice_date", "grand_total", "tax_total", "vendor_gstin")
+
+def normalise(v):
+    if v is None: return None
+    s = str(v).strip().lower().replace(",", "")
+    try: return round(float(s), 2)
+    except ValueError: return s
+
+def field_scores(preds, truths):
+    return {f: round(sum(normalise(p.get(f)) == normalise(t.get(f)) for p, t in zip(preds, truths)) / len(truths), 3)
+            for f in FIELDS}
+```
+
+Report per-field accuracy, line-item F1 (match items by description similarity), straight-through rate, error rate among auto-approved documents, errors caught by validation, and cost and latency per page. Compare text-only, image-only and text+image inputs, and two different models.
+
+## Security & privacy checklist
+
+- [ ] Uploads: allow-list MIME types (PDF, PNG, JPEG), check magic bytes, cap size and page count.
+- [ ] Store files in private object storage with server-side encryption; generate short-lived signed URLs for the review UI.
+- [ ] Invoices are business-sensitive: define a retention policy and delete originals after it.
+- [ ] Reviewers authenticate; every correction is attributed and audit-logged.
+- [ ] Treat document text as untrusted input. It can contain injected instructions, so the model only ever outputs schema data through the forced tool call.
+- [ ] Workers run with least-privilege credentials; the API can't read the corrections table directly.
+
+## Deploy it
+
+Docker Compose with `api`, `worker`, `postgres`, `redis` and `review-ui` for local and staging. In production, use managed Postgres and Redis and run the API and worker on a container platform. Add metrics for documents processed, auto-approval rate, failures, tokens and cost.
+
+## Stretch goals
+
+- Classify document type (invoice / credit note / receipt / other) before extraction.
+- Multi-page invoices with line items spanning pages.
+- Push approved invoices to a mock ERP through its REST API.
+- Compare against a managed document-AI service on cost and accuracy.
+
+## Show it off
+
+README: the pipeline diagram, schema decisions, validation rules, the evaluation table, the routing thresholds and why you chose them, privacy notes, and limitations.
+
+**Interview talking points:** why you route on validation rules and not model confidence alone; how corrections improve the system over time; how you'd process 100,000 invoices a month within budget.
