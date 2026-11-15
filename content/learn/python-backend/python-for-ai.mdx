@@ -1,0 +1,287 @@
+---
+summary: The Python you'll actually use as an AI Engineer — data structures, functions with type hints, Pydantic models, JSON and JSONL files, errors, generators and decorators — taught through small, real AI tasks.
+---
+
+## Why Python?
+
+<Level l="beginner" />
+
+Nearly every AI library, model SDK and tutorial is written for Python first. You don't need to know *all* of Python. You need to be fluent in a fairly small part of it, the part this lesson covers, and comfortable reading other people's code.
+
+<Analogy>
+Think of Python as the workshop and AI libraries as power tools. You don't need to know how the drill is built, but you do need to know how to hold it, change the bit and not drill through your hand. This lesson is about holding the tools well.
+</Analogy>
+
+If you've never programmed, work through the official [Python tutorial](https://docs.python.org/3/tutorial/) up to "Classes" first, then come back. If you code in another language (Java, JavaScript, C#), read on: this lesson maps what you know onto Python's way of doing things.
+
+## The four data structures you'll use every day
+
+<Level l="beginner" />
+
+| Structure | Looks like | Use it for | AI example |
+|---|---|---|---|
+| `list` | `["refund", "late", "broken"]` | Ordered items you add to or loop over | Chat messages, retrieved chunks |
+| `dict` | `{"role": "user", "content": "Hi"}` | Named fields; looking things up by key | One chat message, a JSON API response |
+| `set` | `{"python", "sql"}` | Unique items; fast "is it in here?" checks | Skills on a résumé, seen document IDs |
+| `tuple` | `(0.91, "doc-17")` | A fixed group of values | A (score, document) pair from search |
+
+Almost every LLM API takes and returns lists of dicts:
+
+```python title="messages.py"
+messages = [
+    {"role": "system", "content": "You are a helpful HR assistant."},
+    {"role": "user", "content": "How many casual leaves do I get?"},
+]
+messages.append({"role": "assistant", "content": "You get 12 casual leaves a year."})
+
+for m in messages:
+    print(f"{m['role']:>9}: {m['content']}")
+```
+
+### Comprehensions
+
+A **comprehension** builds a new list, dict or set from an existing one in a single readable line. You'll see them everywhere in AI code.
+
+```python title="comprehensions.py"
+docs = [{"id": "a", "text": "Refund policy...", "score": 0.82},
+        {"id": "b", "text": "Shipping times...", "score": 0.41},
+        {"id": "c", "text": "Returns for electronics...", "score": 0.77}]
+
+relevant   = [d for d in docs if d["score"] >= 0.5]          # filter
+ids        = [d["id"] for d in relevant]                     # transform  → ['a', 'c']
+by_id      = {d["id"]: d for d in docs}                      # dict lookup table
+best_first = sorted(docs, key=lambda d: d["score"], reverse=True)
+```
+
+<Tip>
+If a comprehension needs more than one `if` or doesn't fit on one line, write a normal `for` loop instead. Readable beats clever.
+</Tip>
+
+## Functions with type hints
+
+<Level l="beginner" />
+
+**Type hints** say what a function expects and returns. Python doesn't enforce them at run time, but your editor uses them to catch mistakes, and libraries like FastAPI and Pydantic use them to validate data automatically.
+
+```python title="chunking.py"
+def chunk_text(text: str, size: int = 500, overlap: int = 50) -> list[str]:
+    """Split text into overlapping chunks of roughly `size` characters."""
+    if overlap >= size:
+        raise ValueError("overlap must be smaller than size")
+    chunks, start = [], 0
+    while start < len(text):
+        chunks.append(text[start:start + size])
+        start += size - overlap
+    return chunks
+
+pieces = chunk_text(open("policy.txt").read(), size=800)
+print(len(pieces), "chunks")
+```
+
+Notice the **default arguments** (`size=500`) and the **docstring**. Docstrings matter more in AI engineering than elsewhere: when you turn a function into a tool for an agent, its docstring becomes the description the model reads to decide when to call it.
+
+## Classes, dataclasses and Pydantic
+
+<Level l="beginner" />
+
+You'll write few classes from scratch, but you'll constantly describe the *shape* of data. Python has two good ways to do that.
+
+**Dataclasses** are lightweight containers for your own internal data:
+
+```python title="dataclass_demo.py"
+from dataclasses import dataclass, field
+
+@dataclass
+class Chunk:
+    doc_id: str
+    text: str
+    page: int
+    tags: list[str] = field(default_factory=list)
+
+c = Chunk(doc_id="leave_policy.pdf", text="Employees get 12 casual leaves...", page=3)
+print(c)   # Chunk(doc_id='leave_policy.pdf', text='Employees get...', page=3, tags=[])
+```
+
+**Pydantic models** look similar but *validate* data. Use them at every boundary where data comes from outside your code: API requests, files, and especially **model outputs**.
+
+```python title="pydantic_demo.py"
+from pydantic import BaseModel, Field, ValidationError
+
+class Ticket(BaseModel):
+    category: str = Field(description="billing, technical or account")
+    urgency: int = Field(ge=1, le=5)
+    summary: str = Field(max_length=200)
+
+raw = '{"category": "billing", "urgency": 7, "summary": "Charged twice"}'   # e.g. from an LLM
+try:
+    t = Ticket.model_validate_json(raw)
+except ValidationError as e:
+    print(e)   # urgency: Input should be less than or equal to 5
+```
+
+<Note title="Why this matters for AI">
+LLMs produce text that is *usually* correct. Pydantic turns "usually" into "always or a clear error you can handle", for example by asking the model to try again. You'll use this pattern in almost every project on this site.
+</Note>
+
+## Files: text, JSON and JSONL
+
+<Level l="beginner" />
+
+AI datasets and evaluation sets are mostly **JSON Lines** (`.jsonl`): one JSON object per line. It's easy to append to and easy to stream through without loading everything into memory.
+
+```python title="files.py"
+import json
+from pathlib import Path
+
+# Write an eval set
+cases = [{"question": "Casual leaves per year?", "expected": "12"},
+         {"question": "Notice period?", "expected": "60 days"}]
+with open("golden.jsonl", "w", encoding="utf-8") as f:
+    for c in cases:
+        f.write(json.dumps(c, ensure_ascii=False) + "\n")
+
+# Read it back, one line at a time
+with open("golden.jsonl", encoding="utf-8") as f:
+    loaded = [json.loads(line) for line in f if line.strip()]
+
+# Walk a folder of documents
+for path in Path("docs").glob("**/*.md"):
+    print(path.name, len(path.read_text(encoding="utf-8")))
+```
+
+<Pitfall title="Always set encoding='utf-8'">
+Leave it out and Windows may default to a different encoding, which garbles ₹ symbols, accented names and every non-English script. It's the most common "works on my laptop, fails on yours" bug in text processing.
+</Pitfall>
+
+## Errors and exceptions
+
+<Level l="beginner" />
+
+External calls fail: networks drop, APIs rate-limit you, models return broken JSON. Handle the errors you *expect* specifically, and let unexpected ones surface.
+
+```python title="errors.py"
+import json
+
+def parse_model_json(text: str) -> dict | None:
+    """Models sometimes wrap JSON in ```json fences or add a sentence before it."""
+    cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None              # caller decides: retry, fall back, or report
+
+result = parse_model_json('```json\n{"intent": "refund"}\n```')
+print(result)   # {'intent': 'refund'}
+```
+
+<Pitfall title="Never write a bare except">
+`except:` or `except Exception: pass` hides every bug, including your own typos. Catch the specific error (`json.JSONDecodeError`, `httpx.TimeoutException`), and if you must catch broadly, at least log it.
+</Pitfall>
+
+## Generators: producing values one at a time
+
+<Level l="intermediate" />
+
+A **generator** uses `yield` to hand back values one at a time instead of building a whole list first. This is exactly how token **streaming** works: the model sends a few characters at a time and your code passes them on as they arrive.
+
+```python title="generators.py"
+import time
+
+def fake_llm_stream(answer: str):
+    for word in answer.split():
+        time.sleep(0.05)           # pretend we're waiting on the network
+        yield word + " "
+
+for token in fake_llm_stream("Your refund will arrive in 5 to 7 working days."):
+    print(token, end="", flush=True)   # the user sees words appear immediately
+```
+
+Generators also let you process files bigger than memory: `for line in open("huge.jsonl")` reads one line at a time.
+
+## Decorators: wrapping a function with extra behaviour
+
+<Level l="intermediate" />
+
+A **decorator** wraps a function to add behaviour (timing, caching, retrying) without changing the function itself. You'll mostly *use* decorators from libraries — `@app.post` in FastAPI, `@retry` in tenacity, `@tool` in agent frameworks — but writing one shows how they work:
+
+```python title="decorators.py"
+import functools, time
+
+def timed(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            print(f"{fn.__name__} took {time.perf_counter() - start:.2f}s")
+    return wrapper
+
+@timed
+def summarise(text: str) -> str:
+    time.sleep(0.3)                    # stand-in for an LLM call
+    return text[:60] + "..."
+
+summarise("Employees are entitled to twelve days of casual leave per calendar year...")
+```
+
+## Putting it together: a ticket-triage script
+
+<Level l="intermediate" />
+
+A small but realistic task: read support tickets from a JSONL file, estimate how many tokens they'd cost to send to a model, and group them by keyword before you spend any money.
+
+```python title="triage.py"
+import json
+from collections import Counter
+from pathlib import Path
+from pydantic import BaseModel, ValidationError
+
+class Ticket(BaseModel):
+    id: str
+    text: str
+
+KEYWORDS = {"refund": "billing", "charged": "billing", "password": "account",
+            "login": "account", "crash": "technical", "error": "technical"}
+
+def load_tickets(path: Path):
+    with path.open(encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            try:
+                yield Ticket.model_validate_json(line)
+            except ValidationError as e:
+                print(f"line {n}: skipped ({e.error_count()} errors)")
+
+def guess_category(text: str) -> str:
+    words = text.lower().split()
+    return next((cat for kw, cat in KEYWORDS.items() if kw in words), "other")
+
+tickets = list(load_tickets(Path("tickets.jsonl")))
+approx_tokens = sum(len(t.text) // 4 for t in tickets)     # rule of thumb: ~4 characters per token
+counts = Counter(guess_category(t.text) for t in tickets)
+
+print(f"{len(tickets)} tickets, about {approx_tokens:,} tokens")
+for cat, n in counts.most_common():
+    print(f"  {cat:<10} {n}")
+```
+
+This uses everything from the lesson: Pydantic validation, a generator, a dict lookup, a comprehension, `Counter`, f-strings and a type-hinted function. In the [next lesson](/learn/python-backend/apis-async-streaming/) you'll send these tickets to a real model.
+
+<Interview>
+<QA q="Why use Pydantic for LLM output instead of just json.loads?">
+`json.loads` only checks that the text is valid JSON. Pydantic also checks the *shape*: required fields, types, ranges and allowed values. It gives a precise error you can feed back to the model for a retry, and it hands you a typed object instead of a loose dict.
+</QA>
+<QA q="What's the difference between a list and a generator?">
+A list holds every value in memory at once. A generator produces values one at a time, on demand. Generators are used for streaming LLM tokens and for processing files too big to load.
+</QA>
+<QA q="Why do docstrings matter more in AI code?">
+When a function becomes an agent tool, frameworks send its name, docstring and type hints to the model as the tool description. A vague docstring means the model calls the tool at the wrong time or with the wrong arguments.
+</QA>
+</Interview>
+
+<Takeaways>
+- AI code is mostly lists of dicts, JSON and JSONL. Get fluent with comprehensions, `json` and `pathlib`.
+- Type hints and docstrings aren't decoration: frameworks and models read them.
+- Validate anything from outside your code (requests, files, model output) with Pydantic.
+- Generators are how streaming works; decorators are how libraries add retries, routes and tools.
+</Takeaways>

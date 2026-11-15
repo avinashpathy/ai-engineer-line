@@ -1,0 +1,187 @@
+---
+summary: What "learning" means for a machine — features, labels, parameters, loss and gradient descent — with a hand-worked example, the classic algorithms worth knowing, and your first scikit-learn model.
+---
+
+## Rules vs learning
+
+<Level l="beginner" />
+
+Traditional software is **rules written by people**: "if the email contains 'lottery' and 'winner', mark it as spam." That breaks as soon as spammers change their wording.
+
+**Machine learning** flips this around. You give the computer *examples* (thousands of emails, each labelled spam or not spam) and an algorithm *finds the rules itself* by adjusting numbers until its predictions match the labels.
+
+<Analogy>
+Teaching a child to recognise dogs. You don't hand them a rulebook ("four legs, fur, tail…" — cats have those too). You point at many dogs and non-dogs and say "dog" or "not dog". Eventually they recognise dogs they've never seen. Machine learning is that, with numbers.
+</Analogy>
+
+Every LLM you'll use was built this way, at enormous scale. Understanding the small version makes the big one much less mysterious.
+
+## The vocabulary
+
+<Level l="beginner" />
+
+| Term | Meaning | House-price example |
+|---|---|---|
+| **Example** (row) | One thing you have data about | One house that was sold |
+| **Features** | The inputs, as numbers | Area in sq ft, bedrooms, distance to the metro |
+| **Label** (target) | The answer you want to predict | Sale price |
+| **Model** | A function from features to a prediction | `price = w₁·area + w₂·bedrooms + b` |
+| **Parameters** (weights) | The numbers inside the model that get learned | `w₁`, `w₂`, `b` |
+| **Loss** | One number saying how wrong the predictions are | Average squared error in price |
+| **Training** | Adjusting parameters to reduce the loss | Nudging `w₁`, `w₂`, `b` until errors are small |
+| **Inference** | Using the trained model on new data | Predicting the price of a house just listed |
+
+GPT-class models are the same idea with billions of parameters, text as features, and "the next token" as the label.
+
+## Three kinds of learning
+
+<Level l="beginner" />
+
+| Type | Data | Learns to | Examples |
+|---|---|---|---|
+| **Supervised** | Features *and* labels | Predict the label | Spam detection, price prediction, ticket routing |
+| **Unsupervised** | Features only | Find structure | Customer segments, topic clusters, anomaly detection |
+| **Self-supervised** | Raw data; labels made from the data itself | Predict a hidden part | LLM pre-training: hide the next word, predict it |
+
+Supervised problems come in two shapes: **classification** (predict a category, like "billing" or "technical") and **regression** (predict a number, like a price or a delivery time).
+
+## How a model learns: loss and gradient descent
+
+<Level l="intermediate" />
+
+Training is a loop:
+
+1. Make predictions with the current parameters.
+2. Measure how wrong they are with a **loss function**.
+3. Work out which direction to nudge each parameter to reduce the loss — that direction is the **gradient** (the slope).
+4. Take a small step in that direction. The step size is the **learning rate**.
+5. Repeat until the loss stops falling.
+
+<GradientDescent caption="Gradient descent on a single weight. Each numbered point is one training step. Steps are big where the curve is steep and shrink near the bottom, where the slope is almost flat." />
+
+<Example title="Worked example: one step of gradient descent by hand">
+We want to learn `y = w·x` from one example: x = 2, y = 6 (so the right answer is w = 3). Start with **w = 1** and learning rate **0.1**.
+
+1. **Predict:** ŷ = w·x = 1 × 2 = **2**.
+2. **Loss** (squared error): (ŷ − y)² = (2 − 6)² = **16**.
+3. **Gradient:** the slope of the loss with respect to w is 2·(ŷ − y)·x = 2 × (−4) × 2 = **−16**. Negative means "increasing w reduces the loss".
+4. **Update:** w ← w − 0.1 × (−16) = 1 + 1.6 = **2.6**.
+
+Check: the new prediction is 2.6 × 2 = 5.2, loss (5.2 − 6)² = **0.64**. From 16 to 0.64 in one step. A few more steps and w settles at 3.
+</Example>
+
+The same four lines run inside every deep-learning framework, just for millions of weights at once:
+
+```python title="gradient_descent.py"
+import numpy as np
+
+rng = np.random.default_rng(0)
+x = rng.uniform(0, 10, 200)
+y = 3 * x + 7 + rng.normal(0, 2, 200)       # the true rule: y = 3x + 7, plus noise
+
+w, b, lr = 0.0, 0.0, 0.01
+for step in range(2000):
+    y_hat = w * x + b
+    error = y_hat - y
+    loss = (error ** 2).mean()
+    w -= lr * 2 * (error * x).mean()          # gradient of the loss w.r.t. w
+    b -= lr * 2 * error.mean()                # gradient of the loss w.r.t. b
+    if step % 500 == 0:
+        print(f"step {step:4d}  loss {loss:7.2f}  w {w:.2f}  b {b:.2f}")
+print(f"learned: y = {w:.2f}x + {b:.2f}")    # close to 3x + 7
+```
+
+<Pitfall title="Choosing the learning rate">
+Too small and training crawls. Too large and each step overshoots the bottom, so the loss bounces around or explodes into `nan`. If your loss becomes `nan`, the learning rate is the first thing to lower.
+</Pitfall>
+
+## Generalisation: the actual goal
+
+<Level l="intermediate" />
+
+A model that's perfect on its training data but wrong on new data is useless. The goal is to **generalise**. So you always split your data:
+
+| Split | Typical share | Used for |
+|---|---|---|
+| **Training set** | 70–80% | Learning the parameters |
+| **Validation set** | 10–15% | Choosing settings and deciding when to stop |
+| **Test set** | 10–15% | One final, honest score. Touch it once. |
+
+Two failure modes to recognise:
+
+- **Underfitting:** the model is too simple to capture the pattern, so it does badly on training *and* validation data.
+- **Overfitting:** the model memorises the training data, including its noise. Training error keeps falling while validation error starts rising.
+
+<OverfitCurve caption="The classic overfitting picture. Stop training (or simplify the model) where validation loss is lowest, not where training loss is lowest." />
+
+Remedies for overfitting: more data, a simpler model, **regularisation** (penalising large weights), dropout in neural networks, and **early stopping**.
+
+## The classic algorithms
+
+<Level l="intermediate" />
+
+Before reaching for an LLM, know these. On tabular data (spreadsheets, database tables) they're often faster, cheaper and *more accurate* than anything else.
+
+| Algorithm | Type | How it works, in one line | Good for |
+|---|---|---|---|
+| Linear regression | Regression | Weighted sum of features | Simple numeric predictions; a baseline |
+| Logistic regression | Classification | Weighted sum squashed into a probability | Fast, explainable classification; text with TF-IDF |
+| Decision tree | Both | A flowchart of yes/no questions | Explainability; mixed feature types |
+| Random forest | Both | Many trees on random samples, voting | Strong default with little tuning |
+| Gradient boosting (XGBoost, LightGBM) | Both | Trees added one at a time to fix earlier errors | Usually the best on tabular data |
+| k-nearest neighbours | Both | Look at the most similar known examples | Simple similarity-based prediction |
+| k-means | Clustering | Group points around k centres | Segmenting customers, grouping documents |
+
+<Tip title="Where classical ML shows up in AI products">
+Routing tickets before they reach an LLM, predicting which conversations will need a human, ranking search results, detecting fraud, forecasting load. A hybrid system — a cheap classifier first, an LLM only for the hard cases — is a common, very cost-effective design.
+</Tip>
+
+## Your first real model with scikit-learn
+
+<Level l="intermediate" />
+
+scikit-learn gives every algorithm the same interface: `fit` to train, `predict` to use. A **pipeline** bundles preprocessing and model so the exact same steps run in training and in production.
+
+```python title="first_model.py"
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+import joblib
+
+X, y = load_breast_cancer(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+models = {
+    "logistic regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
+    "random forest": RandomForestClassifier(n_estimators=300, random_state=42),
+}
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    print(f"{name:<20} test accuracy: {model.score(X_test, y_test):.3f}")
+
+joblib.dump(models["logistic regression"], "model.joblib")   # load later with joblib.load
+```
+
+`StandardScaler` rescales each feature to a similar range, which many algorithms need. `stratify=y` keeps the same class balance in train and test. Accuracy is a start, but as the [next lesson](/learn/ml-essentials/evaluation-basics/) shows, it can be badly misleading.
+
+<Interview>
+<QA q="What's the difference between parameters and hyperparameters?">
+Parameters (weights) are learned from data during training. Hyperparameters are settings you choose before training — learning rate, number of trees, regularisation strength — usually tuned using the validation set.
+</QA>
+<QA q="Your training accuracy is 99% and validation accuracy is 72%. What's going on and what do you do?">
+Overfitting: the model has memorised the training data. Get more data, simplify the model, add regularisation or dropout, use early stopping, and check for leakage or duplicated examples between the splits.
+</QA>
+<QA q="Why would you use XGBoost instead of an LLM?">
+For structured, tabular prediction (churn, fraud, pricing), gradient-boosted trees are usually more accurate, far cheaper, faster, deterministic and easier to explain than an LLM.
+</QA>
+</Interview>
+
+<Takeaways>
+- Machine learning finds rules from examples by adjusting parameters to reduce a loss.
+- Gradient descent: predict, measure the error, compute the slope, take a small step downhill, repeat.
+- The goal is generalisation. Keep separate train, validation and test sets, and watch for overfitting.
+- On tabular data, classic algorithms (especially gradient boosting) are often the best and cheapest choice.
+</Takeaways>

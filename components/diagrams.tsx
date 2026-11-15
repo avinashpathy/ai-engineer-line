@@ -310,3 +310,153 @@ export function BPEMerges({ caption }: { caption?: string }) {
     </Fig>
   );
 }
+
+/* 10 — Gradient descent on a loss curve */
+export function GradientDescent({ caption }: { caption?: string }) {
+  const X0 = 60, X1 = 700, Y0 = 40, Y1 = 330;
+  const f = (w: number) => (w - 3) ** 2;                    // loss(w), minimum at w = 3
+  const sx = (w: number) => X0 + ((w + 1) / 8) * (X1 - X0);  // w from -1 to 7
+  const sy = (l: number) => Y1 - (l / 16) * (Y1 - Y0);       // loss from 0 to 16
+  const curve = Array.from({ length: 81 }, (_, i) => { const w = -1 + i * 0.1; return `${i ? "L" : "M"}${sx(w).toFixed(1)} ${sy(Math.min(f(w), 16)).toFixed(1)}`; }).join(" ");
+  const steps: number[] = []; let w = -0.6; for (let i = 0; i < 6; i++) { steps.push(w); w = w - 0.15 * 2 * (w - 3); }
+  return (
+    <Fig w={760} label="Gradient descent: starting on the left of a bowl-shaped loss curve, each step moves downhill by the learning rate times the slope, with steps shrinking as the slope flattens near the minimum" caption={caption}>
+      <g data-h={400}>
+        <line x1={X0} y1={Y1} x2={X1} y2={Y1} stroke={INK} strokeWidth={2} />
+        <line x1={X0} y1={Y0 - 10} x2={X0} y2={Y1} stroke={INK} strokeWidth={2} />
+        <text x={X1} y={Y1 + 28} textAnchor="end" className="dm" fill={MUTED}>WEIGHT w →</text>
+        <text x={X0 - 10} y={Y0 - 16} className="dm" fill={MUTED}>LOSS ↑</text>
+        <path d={curve} fill="none" stroke={C.r} strokeWidth={4} />
+        {steps.map((s, i) => i < steps.length - 1 && (
+          <path key={"a" + i} d={`M${sx(s)} ${sy(f(s))} Q${(sx(s) + sx(steps[i + 1])) / 2} ${Math.min(sy(f(s)), sy(f(steps[i + 1]))) - 26} ${sx(steps[i + 1])} ${sy(f(steps[i + 1]))}`} fill="none" stroke={INK} strokeWidth={2} strokeDasharray="5 4" markerEnd="url(#gd)" />
+        ))}
+        {steps.map((s, i) => (
+          <g key={"p" + i}>
+            <circle cx={sx(s)} cy={sy(f(s))} r={10} fill={i === 0 ? C.f : i === steps.length - 1 ? C.g : "#fff"} stroke={INK} strokeWidth={3} />
+            <text x={sx(s)} y={sy(f(s)) + 30} textAnchor="middle" className="dm" fill={INK}>{i}</text>
+          </g>
+        ))}
+        <line x1={sx(3)} y1={Y1} x2={sx(3)} y2={Y1 + 8} stroke={INK} strokeWidth={2} />
+        <text x={sx(3)} y={Y1 + 24} textAnchor="middle" fontSize={14} fontWeight={700} fill={C.g}>minimum</text>
+        <text x={X0} y={Y1 + 58} fontSize={15} fill={INK}><tspan fontWeight={700}>Update rule:</tspan> w ← w − learning_rate × slope. Big slope, big step; flat slope, small step.</text>
+        <defs><marker id="gd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill={INK} /></marker></defs>
+      </g>
+    </Fig>
+  );
+}
+
+/* 11 — Training vs validation loss: when to stop */
+export function OverfitCurve({ caption }: { caption?: string }) {
+  const X0 = 70, X1 = 700, Y0 = 30, Y1 = 300, N = 40;
+  const sx = (e: number) => X0 + (e / N) * (X1 - X0), sy = (l: number) => Y1 - (l / 2.4) * (Y1 - Y0);
+  const train = (e: number) => 2.2 * Math.exp(-e / 7) + 0.08;
+  const val = (e: number) => 2.2 * Math.exp(-e / 8) + 0.35 + Math.max(0, e - 14) ** 1.6 * 0.006;
+  const path = (fn: (e: number) => number) => Array.from({ length: N + 1 }, (_, e) => `${e ? "L" : "M"}${sx(e).toFixed(1)} ${sy(fn(e)).toFixed(1)}`).join(" ");
+  const best = 14;
+  return (
+    <Fig w={760} label="Training loss keeps falling while validation loss falls, bottoms out around epoch 14, then rises: the model has started memorising the training data" caption={caption}>
+      <g data-h={380}>
+        <rect x={sx(0)} y={Y0} width={sx(best) - sx(0)} height={Y1 - Y0} fill="#EEF4FF" />
+        <rect x={sx(best)} y={Y0} width={X1 - sx(best)} height={Y1 - Y0} fill="#FDEDEB" />
+        <text x={sx(best / 2)} y={Y0 + 22} textAnchor="middle" className="dt" fontSize={18} fill={C.r}>Still learning</text>
+        <text x={(sx(best) + X1) / 2} y={Y0 + 22} textAnchor="middle" className="dt" fontSize={18} fill={C.f}>Overfitting</text>
+        <line x1={X0} y1={Y1} x2={X1} y2={Y1} stroke={INK} strokeWidth={2} /><line x1={X0} y1={Y0} x2={X0} y2={Y1} stroke={INK} strokeWidth={2} />
+        <path d={path(train)} fill="none" stroke={INK} strokeWidth={4} />
+        <path d={path(val)} fill="none" stroke={C.f} strokeWidth={4} strokeDasharray="10 6" />
+        <line x1={sx(best)} y1={Y0} x2={sx(best)} y2={Y1} stroke={C.g} strokeWidth={3} />
+        <circle cx={sx(best)} cy={sy(val(best))} r={9} fill={C.g} stroke={INK} strokeWidth={2} />
+        <text x={sx(best) + 12} y={sy(val(best)) - 14} fontSize={15} fontWeight={700} fill={C.g}>stop here (early stopping)</text>
+        <text x={sx(N) - 4} y={sy(train(N)) - 10} textAnchor="end" fontSize={15} fontWeight={700} fill={INK}>training loss</text>
+        <text x={sx(N) - 4} y={sy(val(N)) - 12} textAnchor="end" fontSize={15} fontWeight={700} fill={C.f}>validation loss</text>
+        <text x={X1} y={Y1 + 26} textAnchor="end" className="dm" fill={MUTED}>EPOCHS (PASSES OVER THE TRAINING DATA) →</text>
+        <text x={X0} y={Y1 + 52} fontSize={15} fill={INK}>The gap between the curves is the model memorising instead of generalising.</text>
+      </g>
+    </Fig>
+  );
+}
+
+/* 12 — Confusion matrix */
+export function ConfusionMatrix({ caption, tp = "80", fp = "20", fn = "40", tn = "860", pos = "Fraud", neg = "Not fraud" }:
+  { caption?: string; tp?: string; fp?: string; fn?: string; tn?: string; pos?: string; neg?: string }) {
+  const s = 150, ox = 250, oy = 90;
+  const cell = (x: number, y: number, n: string, name: string, good: boolean) => (
+    <g>
+      <rect x={x} y={y} width={s} height={s} fill={good ? "#E3F4EA" : "#FDEDEB"} stroke={INK} strokeWidth={2} />
+      <text x={x + s / 2} y={y + 70} textAnchor="middle" className="dt" fontSize={40} fill={good ? C.g : C.f}>{n}</text>
+      <text x={x + s / 2} y={y + 102} textAnchor="middle" fontSize={15} fontWeight={700} fill={INK}>{name}</text>
+    </g>
+  );
+  return (
+    <Fig w={720} label={`Confusion matrix: ${tp} true positives, ${fp} false positives, ${fn} false negatives, ${tn} true negatives`} caption={caption}>
+      <g data-h={450}>
+        <text x={ox + s} y={40} textAnchor="middle" className="dm" fill={MUTED}>WHAT THE MODEL PREDICTED</text>
+        <text x={ox + s / 2} y={74} textAnchor="middle" fontSize={16} fontWeight={700} fill={INK}>{pos}</text>
+        <text x={ox + s * 1.5} y={74} textAnchor="middle" fontSize={16} fontWeight={700} fill={INK}>{neg}</text>
+        <text x={60} y={oy + s} className="dm" fill={MUTED} transform={`rotate(-90 60 ${oy + s})`} textAnchor="middle">WHAT WAS TRUE</text>
+        <text x={ox - 14} y={oy + s / 2 + 6} textAnchor="end" fontSize={16} fontWeight={700} fill={INK}>{pos}</text>
+        <text x={ox - 14} y={oy + s * 1.5 + 6} textAnchor="end" fontSize={16} fontWeight={700} fill={INK}>{neg}</text>
+        {cell(ox, oy, tp, "True positive", true)}
+        {cell(ox + s, oy, fn, "False negative", false)}
+        {cell(ox, oy + s, fp, "False positive", false)}
+        {cell(ox + s, oy + s, tn, "True negative", true)}
+        <text x={ox} y={oy + 2 * s + 34} fontSize={14} fill={INK}><tspan fontWeight={700}>Missed cases</tspan> = false negatives · <tspan fontWeight={700}>False alarms</tspan> = false positives</text>
+      </g>
+    </Fig>
+  );
+}
+
+/* 13 — A small neural network */
+export function NeuralNet({ caption }: { caption?: string }) {
+  const layers = [3, 4, 4, 2], names = ["Input", "Hidden 1", "Hidden 2", "Output"], cols = [C.r, C.a, C.a, C.g];
+  const x = (i: number) => 110 + i * 180, y = (n: number, j: number) => 236 + (j - (n - 1) / 2) * 78;
+  return (
+    <Fig w={760} label="A feed-forward neural network with 3 inputs, two hidden layers of 4 neurons and 2 outputs; every neuron connects to every neuron in the next layer" caption={caption}>
+      <g data-h={450}>
+        {layers.slice(0, -1).map((n, i) => Array.from({ length: n }, (_, a) => Array.from({ length: layers[i + 1] }, (_, b) => (
+          <line key={`${i}-${a}-${b}`} x1={x(i)} y1={y(n, a)} x2={x(i + 1)} y2={y(layers[i + 1], b)} stroke={RULE} strokeWidth={2} />
+        ))))}
+        <line x1={x(0)} y1={y(3, 0)} x2={x(1)} y2={y(4, 1)} stroke={C.f} strokeWidth={4} />
+        <text x={(x(0) + x(1)) / 2} y={y(3, 0) - 22} textAnchor="middle" fontSize={14} fontWeight={700} fill={C.f}>weight w</text>
+        {layers.map((n, i) => Array.from({ length: n }, (_, j) => (
+          <circle key={`n${i}-${j}`} cx={x(i)} cy={y(n, j)} r={22} fill={i === 0 ? "#fff" : cols[i]} fillOpacity={i === 0 ? 1 : 0.9} stroke={INK} strokeWidth={3} />
+        )))}
+        {names.map((nm, i) => <text key={nm} x={x(i)} y={416} textAnchor="middle" className="dt" fontSize={20} fill={INK}>{nm}</text>)}
+        <text x={x(1)} y={y(4, 0) - 32} textAnchor="middle" fontSize={13} fontWeight={700} fill={INK}>each neuron: Σ wx + b → activation</text>
+        <text x={x(0)} y={36} textAnchor="middle" className="dm" fill={MUTED}>FEATURES</text>
+        <text x={x(3)} y={36} textAnchor="middle" className="dm" fill={MUTED}>PREDICTIONS</text>
+        <path d={`M${x(0)} 52 H${x(3)}`} stroke={INK} strokeWidth={2} markerEnd="url(#nn)" />
+        <text x={(x(0) + x(3)) / 2} y={46} textAnchor="middle" className="dm" fill={MUTED}>FORWARD PASS</text>
+        <defs><marker id="nn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" fill={INK} /></marker></defs>
+      </g>
+    </Fig>
+  );
+}
+
+/* 14 — Sequential vs async calls */
+export function SyncVsAsync({ caption }: { caption?: string }) {
+  const X0 = 170, unit = 52;                       // 1 second = 52px
+  const bar = (x: number, y: number, s: number, label: string, col: string) => (
+    <g key={label + x + y}>
+      <rect x={X0 + x * unit} y={y} width={s * unit - 4} height={30} fill={col} stroke={INK} strokeWidth={2} />
+      <text x={X0 + x * unit + 10} y={y + 20} fontSize={13} fontWeight={700} fill="#fff">{label}</text>
+    </g>
+  );
+  return (
+    <Fig w={760} label="Sequential code makes three 3-second calls one after another, taking 9 seconds; async code starts all three at once and finishes in about 3 seconds" caption={caption}>
+      <g data-h={300}>
+        <text x={20} y={58} className="dt" fontSize={20} fill={INK}>Sequential</text>
+        <text x={20} y={78} className="dm" fill={MUTED}>9 SECONDS</text>
+        {bar(0, 40, 3, "call 1", C.f)}{bar(3, 40, 3, "call 2", C.f)}{bar(6, 40, 3, "call 3", C.f)}
+        <text x={20} y={168} className="dt" fontSize={20} fill={INK}>Async</text>
+        <text x={20} y={188} className="dm" fill={MUTED}>≈ 3 SECONDS</text>
+        {bar(0, 120, 3, "call 1", C.g)}{bar(0.1, 156, 3, "call 2", C.g)}{bar(0.2, 192, 3, "call 3", C.g)}
+        <line x1={X0} y1={240} x2={X0 + 9 * unit} y2={240} stroke={INK} strokeWidth={2} />
+        {Array.from({ length: 10 }, (_, s) => (
+          <g key={s}><line x1={X0 + s * unit} y1={240} x2={X0 + s * unit} y2={246} stroke={INK} strokeWidth={2} />
+            <text x={X0 + s * unit} y={262} textAnchor="middle" className="dm" fill={MUTED}>{s}s</text></g>
+        ))}
+        <text x={20} y={290} fontSize={14} fill={INK}>While each call waits on the network, async lets the program start the next one.</text>
+      </g>
+    </Fig>
+  );
+}
