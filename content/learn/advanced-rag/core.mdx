@@ -1,0 +1,220 @@
+---
+summary: "Why naive RAG fails in production and a stage-by-stage diagnostic map, query improvements (rewriting, multi-query, decomposition, HyDE, step-back, routing), hybrid search with BM25 and reciprocal rank fusion, cross-encoder re-ranking and relevance thresholds, indexing techniques (parent-child, contextual headers, contextual retrieval, summaries, tables, GraphRAG), agentic RAG, system-design concerns, and a reference architecture."
+---
+
+## Why naive RAG fails
+
+<Level l="intermediate" />
+
+Naive RAG — "embed, take the top 4, stuff them into the prompt" — works for demos and fails in production on vocabulary mismatch, multi-part questions, tables, long documents, exact identifiers (an error code like "E-4012"), and stale or conflicting documents. This lesson is the toolbox for fixing that.
+
+### A diagnostic map
+
+| Stage | Failure | Fix |
+|---|---|---|
+| Ingestion | Tables and scans parsed into garbage | Better parsers (Unstructured, Docling, LlamaParse), OCR, tables → Markdown |
+| Chunking | The answer is split across chunks | Structure-aware chunks, overlap, parent–child |
+| Query | Vague, follow-up or multi-part questions | Rewriting, decomposition, HyDE, multi-query |
+| Retrieval | The right document ranks low or is missed | Hybrid search, re-ranking, better embeddings, metadata filters |
+| Augmentation | Too much noise; "lost in the middle" | Re-rank and trim, contextual compression, best chunks first |
+| Generation | Ignores context, hallucinates, no citations | Stronger prompt, required citations, lower temperature, groundedness check |
+
+```mermaid caption="Advanced RAG adds steps before retrieval (fix the query), during it (hybrid search) and after it (re-rank, threshold, verify)."
+flowchart TD
+  Q[Question] --> PRE[Pre-retrieval<br/>rewrite · multi-query · HyDE · route]
+  PRE --> BM[BM25 keyword search]
+  PRE --> DN[Dense vector search]
+  BM --> F[Fuse with RRF]
+  DN --> F
+  F --> RR[Cross-encoder re-rank<br/>keep top 3–5]
+  RR --> T{Best score above<br/>threshold?}
+  T -- no --> IDK[Reply that the answer<br/>was not found]
+  T -- yes --> G[Generate with citations]
+  G --> V[Groundedness check] --> A[Answer + sources]
+```
+
+## Pre-retrieval: improving the query
+
+<Level l="intermediate" />
+
+- **Query rewriting:** clean up conversational or vague input ([conversational RAG](/learn/rag-orchestration/core/)).
+- **Multi-query:** generate 3–5 paraphrases, retrieve for each, merge the results — covers vocabulary mismatch.
+- **Query decomposition:** split "Compare the leave policies of the India and US offices" into two sub-questions, retrieve for each, combine.
+- **HyDE (hypothetical document embeddings):** ask the LLM to write a *hypothetical* answer, embed that, and search with it. Answers look more like documents than questions do.
+- **Step-back prompting:** ask a more general question first ("What leave types exist?") to retrieve background.
+- **Routing:** classify the query and send it to the right index or tool — policies, product docs, or a SQL database.
+
+```python title="query_tricks.py"
+def multi_query(question: str, n: int = 4) -> list[str]:
+    text = llm(f"Write {n} different search queries that would find documents answering:\n{question}\n"
+               "One per line, no numbering.")
+    return [question] + [line.strip() for line in text.splitlines() if line.strip()][:n]
+
+def hyde(question: str) -> str:
+    # The fake answer may be wrong — it's only used to search, never shown to the user
+    return llm(f"Write a short passage from a company policy document that answers: {question}")
+
+def retrieve_multi(question: str, k: int = 8):
+    seen, out = set(), []
+    for q in multi_query(question) + [hyde(question)]:
+        for doc in dense_search(q, k):
+            if doc.id not in seen:
+                seen.add(doc.id); out.append(doc)
+    return out
+```
+
+## Retrieval: hybrid search
+
+<Level l="intermediate" />
+
+**Dense** (embedding) search understands meaning but can miss exact terms — product codes, names, acronyms. **Sparse BM25** keyword search nails exact matches but misses paraphrases. **Hybrid search** runs both and fuses the rankings, usually with **reciprocal rank fusion (RRF)**: each retriever gives a document 1 / (k + rank), with k ≈ 60, and the scores are summed.
+
+<Example title="Worked example: reciprocal rank fusion">
+- Doc A is rank 1 in BM25 and rank 5 in dense: 1/61 + 1/65 = **0.0318**
+- Doc B is rank 3 in both: 1/63 + 1/63 = **0.0317**
+- Doc C is rank 2 in dense only: 1/62 = **0.0161**
+
+Final order: A, B, C. Documents that **both** retrievers like rise to the top. RRF uses only ranks, so you never have to calibrate BM25 scores against cosine similarities.
+</Example>
+
+```python title="hybrid.py"
+from rank_bm25 import BM25Okapi
+
+tokenised = [c.text.lower().split() for c in chunks]
+bm25 = BM25Okapi(tokenised)
+
+def bm25_search(q: str, k: int = 20):
+    scores = bm25.get_scores(q.lower().split())
+    return [chunks[i] for i in scores.argsort()[::-1][:k]]
+
+def rrf(*rankings, k: int = 60, top: int = 20):
+    score: dict[str, float] = {}
+    by_id = {}
+    for ranking in rankings:
+        for rank, doc in enumerate(ranking, start=1):
+            score[doc.id] = score.get(doc.id, 0.0) + 1 / (k + rank)
+            by_id[doc.id] = doc
+    return [by_id[i] for i in sorted(score, key=score.get, reverse=True)[:top]]
+
+def hybrid_search(q: str):
+    return rrf(bm25_search(q), dense_search(q, 20))
+```
+
+In production, let the database do this — pgvector plus Postgres full-text search in one query ([deep dive](/learn/rag-foundations/deep-dive/)), or the built-in hybrid modes of Qdrant, Weaviate, OpenSearch and Azure AI Search.
+
+## Post-retrieval: re-ranking and compression
+
+<Level l="intermediate" />
+
+**Bi-encoders** (embedding models) encode the query and document separately — fast but approximate. **Cross-encoders** read the query and a document *together* and output a relevance score — much more accurate, but too slow to run over millions of documents. The standard pattern: retrieve 20–50 candidates fast, re-rank them with a cross-encoder, keep the top 3–5.
+
+```python title="rerank.py"
+from sentence_transformers import CrossEncoder
+
+reranker = CrossEncoder("BAAI/bge-reranker-base")
+
+def rerank(query, docs, top_n=4, min_score=0.0):
+    scores = reranker.predict([(query, d.text) for d in docs])
+    ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+    return [d for s, d in ranked[:top_n] if s >= min_score]   # relevance threshold
+
+q = "notice period for resignation during probation"
+best = rerank(q, hybrid_search(q))
+if not best:
+    print("I couldn't find that in the policy documents.")
+```
+
+Other post-retrieval tools:
+
+- **Contextual compression:** extract only the relevant sentences from each chunk.
+- **Deduplication** of near-identical chunks.
+- **MMR (maximal marginal relevance):** diversify results so the top 5 aren't five copies of the same paragraph.
+- **A relevance threshold:** if nothing scores high enough, say "I don't know" instead of forcing an answer.
+
+## Indexing-side techniques
+
+<Level l="advanced" />
+
+- **Parent–child (small-to-big):** index small chunks for precise matching, but return the surrounding parent section for context.
+- **Contextual chunk headers:** prepend the document title and section path to each chunk before embedding ("Leave Policy > Casual Leave > Carry forward: …"). Cheap and very effective.
+- **Contextual retrieval:** have an LLM write a one-sentence context for each chunk *relative to its whole document*, and embed that with the chunk.
+- **Summaries and hypothetical questions:** index LLM-generated summaries, or the questions each chunk answers; retrieve via those, return the original.
+- **Tables and images:** convert tables to Markdown or text descriptions; caption images with a vision model; or use multimodal embeddings.
+- **Knowledge graphs (GraphRAG):** extract entities and relationships to answer multi-hop or "global" questions ([deep dive](/learn/advanced-rag/deep-dive/)).
+
+```python title="parent_child_and_context.py"
+def build_index(doc):
+    for section in split_by_headings(doc):                    # parents: whole sections
+        parent_id = store_parent(section.text, meta=section.meta)
+        for child in split_tokens(section.text, size=200, overlap=30):   # children: small chunks
+            context = llm(                                     # contextual retrieval
+                f"<document>\n{doc.text[:20000]}\n</document>\n"
+                f"Here is a chunk from it:\n<chunk>\n{child}\n</chunk>\n"
+                "Write one sentence situating this chunk within the document. Reply with the sentence only.")
+            header = f"{doc.title} > {section.path}"           # contextual header
+            embed_and_store(text=f"{header}\n{context}\n{child}", parent_id=parent_id)
+
+def retrieve_parents(q, k=8):
+    children = hybrid_search(q)[:k]
+    parent_ids = list(dict.fromkeys(c.parent_id for c in children))   # keep order, de-duplicate
+    return [load_parent(pid) for pid in parent_ids[:3]]              # give the model whole sections
+```
+
+<Tip>
+Contextual retrieval costs one LLM call per chunk at indexing time. Use a small, cheap model and **prompt caching** on the shared document prefix — the document is identical for every chunk in it, so caching cuts most of the cost ([prompt caching](/learn/llm-apis/core/)).
+</Tip>
+
+## Agentic RAG
+
+<Level l="advanced" />
+
+Instead of one fixed retrieve-then-generate pass, an **agent** decides: Do I need to retrieve? From which source? Is what I found enough? Should I search again with a different query?
+
+- **Self-RAG / corrective RAG (CRAG):** grade the retrieved documents for relevance; if they're poor, rewrite the query or fall back to another source such as web search.
+- **Iterative / multi-hop retrieval:** retrieve, read, write a follow-up query, retrieve again.
+- **Tool-augmented:** combine document retrieval with SQL queries, APIs and calculators ([agents](/learn/agent-foundations/)).
+
+A full agentic RAG graph with grading, retries and a grounding check is built in [Production RAG](/learn/production-rag/core/).
+
+## System design concerns
+
+<Level l="advanced" />
+
+| Concern | Design decisions |
+|---|---|
+| Freshness | Incremental ingestion; detect changed documents by hash and re-embed only those; delete stale vectors; show "last updated" |
+| Access control | Store ACL metadata per chunk; filter retrieval by the user's groups; never rely on the LLM to hide data |
+| Scale | ANN index choice, sharding, batch embedding jobs, caching embeddings |
+| Latency | Budget: embed 20 ms + retrieve 30 ms + re-rank 100 ms + LLM 1–3 s. Stream tokens; cache frequent queries (semantic cache); small models for rewriting |
+| Cost | Fewer, better chunks in the prompt; prompt caching; route easy questions to cheaper models |
+| Multilingual | Multilingual embeddings (bge-m3, multilingual-e5) or translate queries |
+| Versioning | Version the index **together with the embedding model** — changing the model means re-indexing everything |
+| Safety | Treat retrieved text as untrusted data (prompt injection); handle PII; keep citations for auditability |
+
+<Example title="Reference architecture: an enterprise policy assistant">
+**Ingestion service (scheduled):** SharePoint/Confluence connectors → parser (tables, OCR) → structure-aware chunker with contextual headers → batch embedding job → Qdrant or pgvector with metadata (department, ACL, updated_at, version).
+
+**Query service (FastAPI):** auth → query rewrite → hybrid retrieval with the ACL filter → cross-encoder re-rank → relevance threshold → prompt with citations → streamed LLM answer → groundedness check → response + sources.
+
+**Operations:** tracing (Langfuse), feedback buttons, nightly evaluation on a golden set, dashboards for latency, cost and the "no answer" rate.
+
+You build this end to end in [Project 04](/projects/policy-rag/).
+</Example>
+
+<Interview>
+<QA q="Bi-encoder vs cross-encoder?">
+Bi-encoders embed the query and document separately — fast and scalable, used for first-stage retrieval. Cross-encoders score the pair jointly — accurate but slow, used to re-rank a short candidate list.
+</QA>
+<QA q="Why hybrid search?">
+Dense retrieval handles paraphrase; BM25 handles exact tokens like IDs and rare names. Fusing both with RRF is more robust than either alone, and RRF needs no score calibration.
+</QA>
+<QA q="What is HyDE and when does it help?">
+You ask the LLM for a hypothetical answer and search with its embedding instead of the question's. It helps when questions are short and phrased very differently from the documents. It adds an LLM call, so measure the gain.
+</QA>
+</Interview>
+
+<Takeaways>
+- Diagnose by stage: ingestion, chunking, query, retrieval, augmentation, generation.
+- The workhorse stack: query rewriting → hybrid search with RRF → cross-encoder re-rank → relevance threshold → cited answer.
+- Indexing tricks (contextual headers, contextual retrieval, parent–child) are cheap and often give the biggest gains.
+</Takeaways>

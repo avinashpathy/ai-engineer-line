@@ -1,0 +1,206 @@
+---
+summary: "RAG in about 50 lines of plain Python with a re-ranker, LlamaIndex as the data-centric alternative, choosing between LangChain, LlamaIndex and no framework, parsing real documents (PDFs, scans, Office, HTML, wikis, spreadsheets, email), cleaning, a streaming FastAPI endpoint that sends sources first, and conversation memory for RAG chatbots."
+---
+
+## RAG in plain Python
+
+<Level l="advanced" />
+
+Frameworks are convenient, but writing RAG yourself once shows there's no magic — and for simple services it's often the most maintainable option.
+
+```python title="rag_plain.py"
+import json
+import numpy as np
+from anthropic import Anthropic
+from pypdf import PdfReader
+from sentence_transformers import CrossEncoder, SentenceTransformer
+
+embedder = SentenceTransformer("BAAI/bge-small-en-v1.5")
+reranker = CrossEncoder("BAAI/bge-reranker-base")
+llm = Anthropic()
+
+# ---------- indexing ----------
+def load_pdf(path):
+    return [(p.extract_text() or "", i + 1) for i, p in enumerate(PdfReader(path).pages)]
+
+def chunk(text, size=800, overlap=150):
+    out, start = [], 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        cut = text.rfind(". ", start, end)                 # prefer sentence boundaries
+        end = cut + 1 if cut > start + size // 2 else end
+        out.append(text[start:end].strip())
+        if end == len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return [c for c in out if len(c) > 40]
+
+records = []
+for path in ["policies/leave.pdf", "policies/travel.pdf"]:
+    for text, page in load_pdf(path):
+        for c in chunk(text):
+            records.append({"text": c, "source": path.split("/")[-1], "page": page})
+
+E = embedder.encode([r["text"] for r in records], normalize_embeddings=True, batch_size=64)
+np.save("index.npy", E)
+json.dump(records, open("records.json", "w"))
+
+# ---------- querying ----------
+def retrieve(q, k=20, top_n=4):
+    qv = embedder.encode(["Represent this sentence for searching relevant passages: " + q],
+                         normalize_embeddings=True)[0]
+    cand = np.argsort(-(E @ qv))[:k]                       # dense retrieval: one matrix-vector product
+    scores = reranker.predict([(q, records[i]["text"]) for i in cand])
+    return [records[i] for i, _ in sorted(zip(cand, scores), key=lambda x: -x[1])[:top_n]]
+
+def answer(q):
+    docs = retrieve(q)
+    ctx = "\n\n".join(f"[{i + 1}] ({d['source']} p.{d['page']}) {d['text']}" for i, d in enumerate(docs))
+    msg = llm.messages.create(
+        model="claude-sonnet-4-5", max_tokens=500, temperature=0,
+        system="Answer only from the numbered passages; cite like [1]. If not found, say so.",
+        messages=[{"role": "user", "content": f"<passages>\n{ctx}\n</passages>\n\nQuestion: {q}"}])
+    return msg.content[0].text, docs
+```
+
+About 50 lines, every step visible and testable. Up to a few hundred thousand chunks, a NumPy matrix is fast enough; beyond that, use a vector database.
+
+## LlamaIndex: the data-centric alternative
+
+<Level l="advanced" />
+
+LlamaIndex focuses on ingestion, indexing and query engines — strong for document-heavy RAG.
+
+```python title="llamaindex_rag.py"
+# pip install llama-index llama-index-embeddings-huggingface llama-index-llms-anthropic
+from llama_index.core import Settings, SimpleDirectoryReader, VectorStoreIndex
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.anthropic import Anthropic as LIAnthropic
+
+Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
+Settings.llm = LIAnthropic(model="claude-sonnet-4-5", temperature=0)
+Settings.node_parser = SentenceSplitter(chunk_size=512, chunk_overlap=64)
+
+docs = SimpleDirectoryReader("policies/").load_data()
+index = VectorStoreIndex.from_documents(docs)
+index.storage_context.persist("li_store")
+
+qe = index.as_query_engine(similarity_top_k=4, response_mode="compact")
+resp = qe.query("Can I carry forward casual leave?")
+print(resp)
+print([n.metadata.get("file_name") for n in resp.source_nodes])
+```
+
+| | LangChain | LlamaIndex | Plain Python |
+|---|---|---|---|
+| Focus | General LLM orchestration; agents via LangGraph | Data ingestion, indexing, retrieval | Exactly your needs |
+| Integrations | Huge | Huge | Whatever you add |
+| Learning curve | Moderate | Moderate | Low (you know Python) |
+| Debuggability | Needs tracing | Needs tracing | Direct |
+| Best for | Multi-step apps, agents | Document Q&A, complex indexes | Simple, stable services |
+
+## Parsing real documents
+
+<Level l="advanced" />
+
+Garbage in, garbage out: **most RAG failures start at parsing.** This is also where **document parsing** decisions pay off most.
+
+| Source | Tools | Watch out for |
+|---|---|---|
+| Digital PDFs | pymupdf / pymupdf4llm (to Markdown), pdfplumber (tables), Docling, Unstructured | Multi-column layouts, headers/footers, hyphenation |
+| Scanned PDFs, images | OCR (Tesseract, PaddleOCR, cloud OCR) or VLM transcription | Rotation, low resolution, handwriting |
+| Word, PowerPoint | python-docx, python-pptx, Docling | Speaker notes, embedded tables |
+| HTML, web | trafilatura, BeautifulSoup | Navigation menus, cookie banners, boilerplate |
+| Confluence, SharePoint, Notion | Official APIs and connectors | Permissions, versions, attachments |
+| Spreadsheets | pandas → per-row text or Markdown tables | Numbers are better queried with SQL than embedded |
+| Email | `email` library, Microsoft Graph | Threads, quoted replies, signatures |
+
+```python title="parse.py"
+import pymupdf4llm
+import trafilatura
+
+md = pymupdf4llm.to_markdown("policies/leave.pdf")      # keeps headings, lists, simple tables
+open("leave.md", "w").write(md)
+
+html = trafilatura.fetch_url("https://example.com/help/article-42")
+clean_text = trafilatura.extract(html, include_tables=True)
+```
+
+For layout-heavy documents (forms, invoices, complex tables), see [document AI](/learn/multimodal-voice/multimodal/).
+
+<Tip>
+**Inspect your chunks.** Before tuning anything, print 20 random chunks and read them. Look for broken words, merged columns, tables flattened into number soup, headers repeated in every chunk, empty or tiny chunks, and missing pages. Fixing parsing often improves accuracy more than any retrieval trick.
+</Tip>
+
+### Cleaning steps
+
+- Remove repeated headers and footers (lines that appear on more than half the pages), page numbers and boilerplate.
+- Fix hyphenated line breaks ("exam-" + newline + "ple" → "example").
+- Normalise whitespace and Unicode.
+- Keep section titles.
+- Attach metadata: source, page, section, last-modified date and **access-control list**.
+
+## A streaming RAG API with FastAPI
+
+<Level l="advanced" />
+
+```python title="api.py"
+import json
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class Q(BaseModel):
+    question: str
+
+@app.post("/ask/stream")
+def ask_stream(q: Q):
+    docs = retrieve(q.question)
+    ctx = "\n\n".join(f"[{i + 1}] {d['text']}" for i, d in enumerate(docs))
+
+    def gen():
+        yield json.dumps({"type": "sources", "sources": [
+            {"n": i + 1, "source": d["source"], "page": d["page"]} for i, d in enumerate(docs)]}) + "\n"
+        with llm.messages.stream(model="claude-sonnet-4-5", max_tokens=600, temperature=0,
+                                 system="Answer from the passages with [n] citations.",
+                                 messages=[{"role": "user", "content": f"{ctx}\n\nQuestion: {q.question}"}]) as s:
+            for text in s.text_stream:
+                yield json.dumps({"type": "token", "text": text}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+```
+
+**Sending sources first** lets the UI render citations immediately while the answer streams — perceived latency drops dramatically. In production, add authentication and the user's access filter to `retrieve` ([production backend](/learn/python-backend/production-backend/)).
+
+## Conversation memory for RAG chatbots
+
+<Level l="advanced" />
+
+| Strategy | How | Trade-off |
+|---|---|---|
+| Full history | Send all turns | Simple; cost grows, hits limits |
+| Window | Last N turns | Cheap; forgets older context |
+| Summary memory | LLM summarises older turns | Compact; may lose details |
+| **Query rewriting** | Standalone query for retrieval; recent turns for generation | The RAG standard |
+| Long-term memory store | Save key facts per user; retrieve when relevant | Personalisation; privacy obligations |
+
+Store sessions in Redis (with a TTL) or a database keyed by session ID — **never in API-process memory** if you run more than one replica. More on this in [context engineering](/learn/context-engineering/core/).
+
+<Interview>
+<QA q="When would you skip LangChain and write RAG yourself?">
+For a simple, stable service with one retriever and one model: plain Python is shorter to read, easier to debug and has fewer dependency upgrades. Reach for a framework when you need many integrations, complex flows or agents.
+</QA>
+<QA q="Your RAG answers are poor. Where do you look first?">
+At the parsed chunks. Print a random sample and check for broken text, flattened tables, missing pages and boilerplate. Then check retrieval with traces — is the right chunk in the top-k? Only then tune the prompt or model.
+</QA>
+</Interview>
+
+<Takeaways>
+- A RAG service can be about 50 lines of plain Python; frameworks add integrations and abstractions.
+- LangChain suits orchestration and agents; LlamaIndex suits document-centric indexing.
+- Parsing quality caps RAG quality — read your chunks. Stream sources first, then tokens.
+</Takeaways>

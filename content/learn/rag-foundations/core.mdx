@@ -1,0 +1,188 @@
+---
+summary: "Why RAG exists, the indexing and query pipelines, embedding models for retrieval, similarity measures, approximate nearest-neighbour indexes (HNSW, IVF, PQ), choosing a vector database, chunking strategies and chunk size, and the grounded, cited prompt — with a working FAISS example."
+---
+
+## Why RAG?
+
+<Level l="beginner" />
+
+LLMs have three problems for enterprise use:
+
+1. They don't know **your private data** — HR policies, contracts, product manuals, tickets.
+2. Their knowledge is **frozen** at the training cutoff.
+3. They **hallucinate** when unsure.
+
+**Retrieval-Augmented Generation (RAG)** fixes all three. At question time, you retrieve relevant passages from your documents, put them in the prompt, and tell the model to answer from them and cite its sources.
+
+<Analogy>
+A closed-book exam versus an open-book exam. Without RAG, the model answers from memory and sometimes bluffs. With RAG, it looks up the right pages first — and you can check which pages it used.
+</Analogy>
+
+## The RAG pipeline
+
+<Level l="beginner" />
+
+RAG has two halves. **Indexing** happens once (and again whenever documents change). **Querying** happens for every question.
+
+```mermaid caption="Indexing runs offline; querying runs for every question. Both must use the same embedding model."
+flowchart TD
+  subgraph IDX[Indexing · offline]
+    D[Documents] --> C[Clean] --> S[Split into chunks] --> E1[Embed each chunk] --> V[(Vector DB<br/>vectors + text + metadata)]
+  end
+  subgraph QRY[Querying · per question]
+    Q[Question] --> E2[Embed question] --> R[Find most similar chunks]
+    R --> P[Prompt = instructions + chunks + question] --> L[LLM] --> A[Answer with citations]
+  end
+  V --> R
+```
+
+## Embeddings for retrieval
+
+<Level l="intermediate" />
+
+An embedding model maps text to a vector so that texts with similar meaning land close together (see [text and embeddings](/learn/transformers/text-and-embeddings/)). For RAG you embed **both** the chunks and the queries with the **same** model.
+
+| Model | Dimensions | Notes |
+|---|---|---|
+| all-MiniLM-L6-v2 | 384 | Tiny, fast, decent English baseline |
+| BAAI/bge-base-en-v1.5, bge-m3 | 768 / 1024 | Strong open models; bge-m3 is multilingual |
+| intfloat/e5-large-v2, multilingual-e5 | 1024 | Strong; needs "query:" / "passage:" prefixes |
+| nomic-embed-text, gte | 768 | Open, long context |
+| API models (OpenAI, Cohere, Voyage) | 256–3072 | Managed, high quality |
+
+The MTEB leaderboard's retrieval tab is a good shortlist. More important is testing on **your** data — the [deep dive](/learn/rag-foundations/deep-dive/) has a small benchmark script.
+
+### Similarity measures
+
+| Measure | What it compares | Notes |
+|---|---|---|
+| Cosine similarity | The angle between vectors (direction only) | The most common choice |
+| Dot product | Direction and length | Equals cosine when vectors are normalised; fastest |
+| Euclidean (L2) distance | Straight-line distance | Smaller means closer |
+
+<Tip>
+**Normalise once, then use the dot product.** If you L2-normalise every embedding when you write it, cosine similarity equals the dot product — which vector indexes compute fastest.
+</Tip>
+
+## Vector search and ANN indexes
+
+<Level l="intermediate" />
+
+Comparing a query against 10 million vectors one by one is too slow for real-time use. **Approximate nearest neighbour (ANN)** indexes give up a tiny bit of recall for 100–1000× more speed.
+
+| Index | Idea | Trade-offs |
+|---|---|---|
+| Flat | Exact brute force | Perfect recall; fine below about 100k vectors |
+| IVF (inverted file) | Cluster vectors with k-means; search only the nearest clusters | Fast; recall depends on how many clusters you probe |
+| **HNSW** | A multi-layer "small-world" graph you navigate greedily from coarse to fine | Excellent speed and recall; more memory; the most popular |
+| PQ (product quantisation) | Compress vectors into short codes | Huge memory savings; lower accuracy |
+
+<Analogy>
+**HNSW** is like finding a house in an unfamiliar city. First take the highway to the right district (top layer, long jumps), then main roads to the neighbourhood, then walk the lanes to the door (bottom layer, short hops). Each layer narrows the search.
+</Analogy>
+
+```python title="faiss_hnsw.py"
+import faiss
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+docs = ["Employees get 12 casual leaves per year.",
+        "Sick leave requires a medical certificate after 2 consecutive days.",
+        "Salary is credited on the last working day of each month.",
+        "Work-from-home is allowed up to 2 days per week with manager approval."]
+
+X = model.encode(docs, normalize_embeddings=True).astype("float32")
+index = faiss.IndexHNSWFlat(X.shape[1], 32, faiss.METRIC_INNER_PRODUCT)   # 32 = graph degree
+index.add(X)
+
+q = model.encode(["When do I get paid?"], normalize_embeddings=True).astype("float32")
+scores, ids = index.search(q, 2)
+for s, i in zip(scores[0], ids[0]):
+    print(f"{s:.3f}  {docs[i]}")
+# 0.80  Salary is credited on the last working day of each month.
+```
+
+Notice the query shares **no words** with the answer ("paid" vs "salary is credited") — semantic search found it anyway.
+
+## Vector databases
+
+<Level l="intermediate" />
+
+| Option | Type | Good for |
+|---|---|---|
+| FAISS | Library (in-process) | Research, prototypes, offline batch jobs |
+| Chroma | Embedded or server | Local development, small apps |
+| **pgvector** (Postgres) | Extension | Teams already on Postgres; SQL filters and vectors together |
+| Qdrant, Weaviate, Milvus | Dedicated vector databases | Scale, filtering, hybrid search |
+| Pinecone | Managed SaaS | Zero operations |
+| Elasticsearch / OpenSearch, Azure AI Search | Search engines with vector support | Hybrid keyword + vector at enterprise scale |
+
+Choose by scale, metadata-filtering needs, hybrid search, operational burden, security (on-premises? role-based access?) and what your team already runs. For most teams starting out, **pgvector** is the pragmatic default.
+
+## Chunking
+
+<Level l="intermediate" />
+
+Documents are split into chunks because:
+
+- embedding models have input limits;
+- one vector for a 50-page PDF is a blurry average of everything in it;
+- prompts should contain only the relevant text.
+
+| Strategy | How | When |
+|---|---|---|
+| Fixed-size | Every N tokens, with overlap | Quick baseline |
+| Recursive character | Split on paragraphs → sentences → words until under the size limit | Sensible default |
+| Structure-aware | Split by headings, sections, Markdown/HTML tags, code functions | Manuals, docs, code |
+| Semantic | Split where similarity between neighbouring sentences drops | Long prose with topic shifts |
+| Parent–child | Retrieve small chunks, return their larger parent section | Precision *and* context |
+
+<Example title="Worked example: choosing a chunk size">
+**Too small (100 tokens):** "It must be submitted within 30 days." What must? The context is lost.
+
+**Too large (3,000 tokens):** one vector mixes the leave, payroll and travel policies, so retrieval gets fuzzy and the prompt fills with noise.
+
+**A good start:** 300–800 tokens with 10–20% overlap. Then tune it with [evaluation](/learn/evaluation/) — measure, don't guess.
+</Example>
+
+## The augmentation prompt
+
+<Level l="beginner" />
+
+The prompt turns retrieved chunks into a grounded answer. Number the sources, tell the model to use only them, give it a way to say "I don't know", and ask for citations.
+
+```text title="rag_prompt.txt"
+You are a helpful assistant for Acme employees.
+Answer the question using ONLY the context below.
+If the context does not contain the answer, say "I couldn't find that in the policy documents."
+Cite sources as [source: filename, page] after each claim.
+
+<context>
+[1] (leave_policy.pdf, p.3) Employees are entitled to 12 casual leaves per calendar year...
+[2] (leave_policy.pdf, p.4) Unused casual leave lapses on 31 December...
+</context>
+
+Question: Can I carry forward my casual leave?
+```
+
+<Pitfall>
+Retrieved text is **data, not instructions**. A document can contain "ignore your instructions and…". Keep it inside clear delimiters, tell the model to treat it as reference only, and never give a RAG assistant tools it doesn't need. See [LLM security](/learn/alignment-safety/core/).
+</Pitfall>
+
+<Interview>
+<QA q="Explain RAG to a non-technical stakeholder.">
+It's an open-book exam for the AI. Before answering, the system looks up the most relevant passages in our own documents and tells the model to answer only from them, with citations — so answers are current, specific to us, and checkable.
+</QA>
+<QA q="How do you choose a chunk size?">
+Start around 300–800 tokens with 10–20% overlap, use structure-aware splitting where documents have headings, then tune with a golden set — measuring retrieval recall and answer faithfulness for each setting.
+</QA>
+<QA q="Why HNSW over a flat index?">
+A flat index compares the query with every vector — exact but linear in collection size. HNSW navigates a layered graph and reaches near-perfect recall in a tiny fraction of the comparisons, at the cost of more memory.
+</QA>
+</Interview>
+
+<Takeaways>
+- RAG = retrieve relevant chunks + generate a grounded, cited answer.
+- Embeddings plus an ANN index (usually HNSW) make semantic search fast.
+- Chunking and the prompt matter as much as the model — tune them with evaluation.
+</Takeaways>

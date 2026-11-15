@@ -2,14 +2,14 @@
 
 This file checks the site against every topic in the *AI Engineer Roadmap* (Learnvora, November 2026 edition): 8 areas × 20 topics. Topic names are used only as a checklist; all explanations on the site are original or adapted from the author's own notes.
 
-**Status:** 110 published · 45 planned (in the notes; arrives when that station is written) · 5 gaps (not in the notes; must be written new)
+**Status:** 135 published · 20 planned (in the notes; arrives when that station is written) · 5 gaps (not in the notes; must be written new)
 
 | Area | ✅ Published | 🕒 Planned | ⚠️ Gap |
 |---|---|---|---|
 | LLM | 20 | 0 | 0 |
-| RAG | 3 | 17 | 0 |
+| RAG | 20 | 0 | 0 |
 | AI Agents | 8 | 9 | 3 |
-| Evals | 12 | 8 | 0 |
+| Evals | 20 | 0 | 0 |
 | AI System Design | 20 | 0 | 0 |
 | AI Security | 20 | 0 | 0 |
 | Deployment | 7 | 11 | 2 |
@@ -48,24 +48,24 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 |---|---|---|---|
 | 01 | Embeddings | ✅ | [transformers/text-and-embeddings](/learn/transformers/text-and-embeddings/) |
 | 02 | Cosine similarity | ✅ | [transformers/text-and-embeddings](/learn/transformers/text-and-embeddings/) |
-| 03 | Chunking strategies | 🕒 | RAG & Vector Search station · used in Project 04 |
-| 04 | Vector databases | 🕒 | RAG & Vector Search station · used in Project 04 |
-| 05 | pgvector | 🕒 | RAG & Vector Search station · used in Projects 02, 05 |
-| 06 | HNSW indexes | 🕒 | RAG & Vector Search deep dive |
-| 07 | Metadata filtering | 🕒 | RAG & Vector Search station · used in Project 04 |
-| 08 | BM25 keyword search | 🕒 | Advanced RAG station · used in Project 04 |
-| 09 | Hybrid search | 🕒 | Advanced RAG station · used in Project 04 |
-| 10 | Reranking | 🕒 | Advanced RAG station · used in Project 04 |
-| 11 | Query rewriting | 🕒 | Advanced RAG station · used in Project 04 |
-| 12 | HyDE | 🕒 | Advanced RAG station |
-| 13 | Contextual retrieval | 🕒 | Advanced RAG station · used in Project 04 |
-| 14 | Parent-child chunking | 🕒 | Advanced RAG station |
-| 15 | Document parsing | ✅ | [multimodal-voice/multimodal](/learn/multimodal-voice/multimodal/) (document AI); more in RAG Orchestration |
-| 16 | Citations | 🕒 | RAG & Vector Search station · used in Project 04 |
-| 17 | GraphRAG | 🕒 | Advanced RAG deep dive |
-| 18 | Agentic RAG | 🕒 | Production RAG station |
-| 19 | Recall@k | 🕒 | Evaluation station · used in Project 04 |
-| 20 | MRR and nDCG | 🕒 | Evaluation station |
+| 03 | Chunking strategies | ✅ | [rag-foundations/core](/learn/rag-foundations/core/), [rag-foundations/deep-dive](/learn/rag-foundations/deep-dive/) |
+| 04 | Vector databases | ✅ | [rag-foundations/core](/learn/rag-foundations/core/) |
+| 05 | pgvector | ✅ | [rag-foundations/deep-dive](/learn/rag-foundations/deep-dive/) |
+| 06 | HNSW indexes | ✅ | [rag-foundations/core](/learn/rag-foundations/core/), [rag-foundations/deep-dive](/learn/rag-foundations/deep-dive/) |
+| 07 | Metadata filtering | ✅ | [rag-orchestration/core](/learn/rag-orchestration/core/), [rag-foundations/deep-dive](/learn/rag-foundations/deep-dive/) |
+| 08 | BM25 keyword search | ✅ | [advanced-rag/core](/learn/advanced-rag/core/) |
+| 09 | Hybrid search | ✅ | [advanced-rag/core](/learn/advanced-rag/core/), [rag-foundations/deep-dive](/learn/rag-foundations/deep-dive/) |
+| 10 | Reranking | ✅ | [advanced-rag/core](/learn/advanced-rag/core/) |
+| 11 | Query rewriting | ✅ | [rag-orchestration/core](/learn/rag-orchestration/core/), [advanced-rag/core](/learn/advanced-rag/core/) |
+| 12 | HyDE | ✅ | [advanced-rag/core](/learn/advanced-rag/core/) |
+| 13 | Contextual retrieval | ✅ | [advanced-rag/core](/learn/advanced-rag/core/) |
+| 14 | Parent-child chunking | ✅ | [advanced-rag/core](/learn/advanced-rag/core/) |
+| 15 | Document parsing | ✅ | [rag-orchestration/deep-dive](/learn/rag-orchestration/deep-dive/), [multimodal-voice/multimodal](/learn/multimodal-voice/multimodal/) |
+| 16 | Citations | ✅ | [rag-foundations/core](/learn/rag-foundations/core/), [rag-orchestration/core](/learn/rag-orchestration/core/) |
+| 17 | GraphRAG | ✅ | [advanced-rag/deep-dive](/learn/advanced-rag/deep-dive/), [production-rag/core](/learn/production-rag/core/) |
+| 18 | Agentic RAG | ✅ | [production-rag/core](/learn/production-rag/core/), [advanced-rag/core](/learn/advanced-rag/core/) |
+| 19 | Recall@k | ✅ | [evaluation/core](/learn/evaluation/core/) |
+| 20 | MRR and nDCG | ✅ | [evaluation/core](/learn/evaluation/core/) |
 
 ## AI Agents
 
@@ -97,22 +97,22 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | # | Topic | Status | Where |
 |---|---|---|---|
 | 01 | Golden datasets | ✅ | [ml-essentials/evaluation-basics](/learn/ml-essentials/evaluation-basics/), [prompt-engineering/core](/learn/prompt-engineering/core/) |
-| 02 | Error analysis | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) (categorise failures); more in Evaluation |
+| 02 | Error analysis | ✅ | [evaluation/core](/learn/evaluation/core/), [prompt-engineering/core](/learn/prompt-engineering/core/) |
 | 03 | LLM as a judge | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) (recipe 8) |
-| 04 | Pairwise comparison | ✅ | [fine-tuning/core](/learn/fine-tuning/core/); more in Evaluation |
+| 04 | Pairwise comparison | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
 | 05 | Rubric scoring | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) |
-| 06 | Faithfulness | 🕒 | Evaluation station · used in Project 04 |
-| 07 | Answer relevance | 🕒 | Evaluation station · used in Project 04 |
-| 08 | Context precision | 🕒 | Evaluation station |
-| 09 | Tool call accuracy | 🕒 | Agent Foundations deep dive · used in Project 08 |
-| 10 | Trajectory evals | 🕒 | Agent Foundations deep dive |
-| 11 | Regression evals in CI | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) (promptfoo); more in Deployment & CI/CD |
+| 06 | Faithfulness | ✅ | [evaluation/core](/learn/evaluation/core/) |
+| 07 | Answer relevance | ✅ | [evaluation/core](/learn/evaluation/core/) |
+| 08 | Context precision | ✅ | [evaluation/core](/learn/evaluation/core/) |
+| 09 | Tool call accuracy | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
+| 10 | Trajectory evals | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
+| 11 | Regression evals in CI | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/), [prompt-engineering/core](/learn/prompt-engineering/core/) |
 | 12 | A/B testing prompts | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) |
-| 13 | Human labeling | ✅ | [choosing-models/core](/learn/choosing-models/core/); more in Evaluation |
-| 14 | Synthetic test data | ✅ | [fine-tuning/deep-dive](/learn/fine-tuning/deep-dive/); more in Evaluation |
-| 15 | Tracing | 🕒 | Observability station · used in Projects 04, 07 |
-| 16 | Langfuse | 🕒 | Observability station · used in Projects 04, 07 |
-| 17 | OpenTelemetry for LLMs | 🕒 | Observability station |
+| 13 | Human labeling | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
+| 14 | Synthetic test data | ✅ | [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
+| 15 | Tracing | ✅ | [evaluation/core](/learn/evaluation/core/), [rag-orchestration/core](/learn/rag-orchestration/core/) |
+| 16 | Langfuse | ✅ | [evaluation/core](/learn/evaluation/core/) |
+| 17 | OpenTelemetry for LLMs | ✅ | [evaluation/core](/learn/evaluation/core/) |
 | 18 | P95 latency | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/), [choosing-models/core](/learn/choosing-models/core/) |
 | 19 | Cost per request | ✅ | [llm-apis/core](/learn/llm-apis/core/), [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/) |
 | 20 | User feedback loops | ✅ | [full-stack-apps/core](/learn/full-stack-apps/core/) |
@@ -123,7 +123,7 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 |---|---|---|---|
 | 01 | Model routing | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/), [choosing-models/core](/learn/choosing-models/core/) |
 | 02 | Model fallbacks | ✅ | [llm-apis/core](/learn/llm-apis/core/) |
-| 03 | Semantic caching | ✅ | [python-backend/production-backend](/learn/python-backend/production-backend/); built in Advanced RAG |
+| 03 | Semantic caching | ✅ | [advanced-rag/deep-dive](/learn/advanced-rag/deep-dive/), [python-backend/production-backend](/learn/python-backend/production-backend/) |
 | 04 | Prefix caching | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/), [llm-apis/core](/learn/llm-apis/core/) |
 | 05 | Token budgets | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
 | 06 | Streaming responses | ✅ | [python-backend/apis-async-streaming](/learn/python-backend/apis-async-streaming/), [llm-apis/core](/learn/llm-apis/core/) |
@@ -137,7 +137,7 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 14 | Batch inference | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/), [llm-apis/core](/learn/llm-apis/core/) |
 | 15 | Async job pipelines | ✅ | [python-backend/production-backend](/learn/python-backend/production-backend/), [full-stack-apps/core](/learn/full-stack-apps/core/) |
 | 16 | Provider rate limits | ✅ | [llm-apis/core](/learn/llm-apis/core/) |
-| 17 | Multi-tenant design | ✅ | [full-stack-apps/core](/learn/full-stack-apps/core/), [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
+| 17 | Multi-tenant design | ✅ | [production-rag/core](/learn/production-rag/core/), [full-stack-apps/core](/learn/full-stack-apps/core/) |
 | 18 | RAG vs fine-tuning | ✅ | [fine-tuning/core](/learn/fine-tuning/core/) |
 | 19 | Context window management | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
 | 20 | Cost optimization | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/) |
@@ -162,7 +162,7 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 14 | Human approval for actions | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 15 | Content moderation | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 16 | Data poisoning | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
-| 17 | Access control in RAG | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) · built in Project 04 |
+| 17 | Access control in RAG | ✅ | [production-rag/core](/learn/production-rag/core/), [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 18 | MCP server trust | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/); more in the MCP station |
 | 19 | Audit logging | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 20 | Red teaming | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
