@@ -1,0 +1,184 @@
+---
+summary: Fine-tuning in practice — data sources and a curation pipeline, near-duplicate removal, synthetic data patterns and their risks, how much data you need, LoRA variants and multi-LoRA serving, training on completions only, knowledge distillation with the economics worked out, continued pre-training, reinforcement fine-tuning, and a troubleshooting table.
+---
+
+## The data is the model
+
+<Level l="advanced" />
+
+A fine-tuned model is a mirror of its training examples: their format, tone, length, accuracy — **and their mistakes**. Spend most of your effort on the data.
+
+### Data sources
+
+| Source | Pros | Cons |
+|---|---|---|
+| Historical human outputs (support replies, reports) | Real distribution, domain language | Inconsistent quality, personal data, outdated policies |
+| Expert-written examples | Highest quality | Expensive, slow |
+| Synthetic data from a stronger LLM | Fast, scalable, controllable diversity | Can be bland or wrong; licence terms; needs review |
+| User feedback logs (thumbs, edits) | Reflects real preferences | Noisy, biased toward vocal users |
+| Public datasets | Free | Rarely match your domain |
+
+### A curation pipeline
+
+```mermaid caption="Every step removes a way for bad examples to teach bad behaviour. The human review at the end is not optional."
+flowchart TD
+  A[1. Collect candidates] --> B[2. Clean<br/>remove personal data, boilerplate, broken records]
+  B --> C[3. Filter for quality<br/>heuristics · LLM-judge score · reviewer ratings]
+  C --> D[4. De-duplicate<br/>exact + near-duplicates]
+  D --> E[5. Balance<br/>cover every intent, cap over-represented ones]
+  E --> F[6. Format<br/>base model's chat template, consistent system prompt]
+  F --> G[7. Split<br/>train · validation · frozen test set]
+  G --> H[8. Human review<br/>read 100+ random examples]
+```
+
+```python title="near_dedupe.py"
+from datasketch import MinHash, MinHashLSH       # pip install datasketch
+
+def minhash(text: str, k: int = 5) -> MinHash:
+    m = MinHash(num_perm=128)
+    for i in range(len(text) - k + 1):
+        m.update(text[i:i + k].encode())
+    return m
+
+lsh = MinHashLSH(threshold=0.85, num_perm=128)
+keep = []
+for i, ex in enumerate(examples):
+    mh = minhash(ex["response"].lower())
+    if not lsh.query(mh):                      # no near-duplicate seen yet
+        lsh.insert(str(i), mh)
+        keep.append(ex)
+print(len(examples), "->", len(keep))
+```
+
+Embedding similarity above ~0.95 is another good near-duplicate test.
+
+## Synthetic data
+
+<Level l="advanced" />
+
+Patterns that work:
+
+- **Seed and evolve:** start with 50 human examples; ask a strong model for variations that are harder, more specific or in different styles (the Evol-Instruct idea).
+- **Persona-driven:** generate questions as different users — a new employee, a manager, an angry customer, a non-native speaker.
+- **Document-grounded:** give the model a policy section and ask for realistic questions plus answers citing that section. Excellent for domain assistants.
+- **Self-consistency filtering:** generate several answers per question; keep only those where the answers agree, or where a verifier (unit tests, a calculator, rules) confirms correctness.
+
+<Pitfall title="Model collapse and licence terms">
+Training repeatedly on synthetic data without human grounding narrows diversity and amplifies errors. Mix in real data, review samples, and check that the generating model's terms allow using its outputs for training.
+</Pitfall>
+
+## How much data?
+
+<Level l="advanced" />
+
+| Goal | Typical examples |
+|---|---|
+| Output format, style or tone | 100–1,000 |
+| Classification-like behaviour | 50–500 per class |
+| Domain-specialised assistant behaviour | 1,000–10,000 |
+| Teaching a new skill (a DSL, complex reasoning) | 10,000+ |
+| Distilling a large model into a small one | 10,000–100,000+ |
+
+Run a **data-scaling curve**: train on 25%, 50% and 100% of your data. If quality still rises steeply at 100%, more data will help; if it plateaus, improve data quality or the base model instead.
+
+## LoRA variants and multi-LoRA serving
+
+<Level l="advanced" />
+
+| Method | Trainable parameters | When |
+|---|---|---|
+| Full fine-tuning | 100% | Lots of data, big domain shift, enough GPUs |
+| LoRA | ~0.1–2% | The default |
+| QLoRA | Same, base in 4-bit | Limited GPU memory |
+| DoRA | LoRA + a learned magnitude per column | Sometimes better quality at the same rank |
+| rsLoRA | Rank-stabilised scaling α/√r | Higher ranks train better |
+| LoRA+ | Different learning rates for A and B | Faster convergence |
+| Prefix / prompt tuning | ~0.01% | Very cheap, many tasks on one model; weaker |
+| IA³ | Rescales activations | Tiny adapters |
+
+```python title="lora_variants.py"
+from peft import LoraConfig
+
+cfg = LoraConfig(r=32, lora_alpha=32, use_rslora=True, use_dora=True, lora_dropout=0.05,
+                 target_modules="all-linear", task_type="CAUSAL_LM")
+```
+
+**Serving many adapters:** keep one base model in GPU memory and hot-swap LoRA adapters per customer or task. vLLM and TGI support multi-LoRA serving, so you get dozens of "custom models" for roughly the cost of one.
+
+**Faster tooling:** Unsloth (custom kernels, ~2× faster with less memory), Axolotl and LLaMA-Factory (config-driven recipes), TRL (SFT, DPO, GRPO trainers), torchtune — or a provider's managed fine-tuning API if you'd rather not manage GPUs.
+
+## Train on completions only
+
+<Level l="advanced" />
+
+The loss should usually be computed only on the **assistant's** tokens, not the system and user prompt. Otherwise the model spends capacity learning to reproduce prompts.
+
+```python title="completion_only.py"
+from trl import SFTConfig
+
+cfg = SFTConfig(output_dir="out", assistant_only_loss=True, packing=True, max_length=2048)
+# packing concatenates short examples into full-length sequences -> much faster training
+```
+
+## Knowledge distillation
+
+<Level l="advanced" />
+
+Make a small model behave like a large one on *your* task:
+
+1. Collect real prompts (thousands).
+2. Generate high-quality responses with the large **teacher** model (optionally with reasoning).
+3. Filter the responses (judge scores, verifiers).
+4. Fine-tune the small **student** on the (prompt, teacher response) pairs.
+5. Evaluate student against teacher on held-out prompts; route only the cases the student handles well.
+
+<Example title="Worked example: distillation economics">
+A support classification-and-reply task runs **2M requests a month** on a large API model at ₹0.60 each = **₹12 lakh/month**.
+
+A distilled 3B model, self-hosted on one GPU (~₹1.5 lakh/month including operations), reaches 95% of the teacher's quality on the eval set. Route 85% of traffic to the student:
+
+0.85 × 2M × ~₹0.05 + 0.15 × 2M × ₹0.60 + ₹1.5L ≈ ₹0.85L + ₹1.8L + ₹1.5L ≈ **₹4.15 lakh/month** — about a **65% saving**.
+</Example>
+
+## Continued pre-training
+
+<Level l="advanced" />
+
+When the domain's vocabulary and knowledge are truly different — legal Hindi, chip design, a programming language the model barely knows — first continue next-token training on large amounts of raw domain text (100M+ tokens), *then* instruction-tune. Mix in some general data to limit forgetting. It's expensive: exhaust RAG and supervised fine-tuning first.
+
+## Reinforcement fine-tuning
+
+<Level l="advanced" />
+
+Beyond imitating examples, a model can be optimised against a **reward**: a verifier (tests pass, the answer matches, the JSON is valid), a reward model, or a rubric-based grader. **GRPO** (group relative policy optimisation) samples several answers per prompt, scores them, and pushes the model toward the above-average ones, with no separate value network. It's how many reasoning abilities are trained, and it's increasingly available for domain tasks with checkable outcomes. [Alignment](/learn/alignment-safety/deep-dive/) covers the related preference methods (RLHF, DPO).
+
+## Troubleshooting
+
+<Level l="advanced" />
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Eval loss rises after epoch 1 | Overfitting, small data | Fewer epochs, lower learning rate, more or more varied data, higher dropout |
+| Outputs repeat training examples verbatim | Memorisation | De-duplicate data, fewer epochs |
+| Model ignores the system prompt or format | Chat-template mismatch | Use `tokenizer.apply_chat_template` for both training and inference |
+| Never stops generating | Missing end-of-sequence token in training targets | Append EOS; check the template |
+| General abilities dropped | Training too aggressive, data too narrow (catastrophic forgetting) | Lower learning rate, LoRA instead of full fine-tuning, mix in general data |
+| Loss is NaN | Learning rate too high, fp16 overflow | bf16, lower learning rate, gradient clipping |
+| No improvement over prompting | The task needs knowledge, not behaviour; or poor data | Use RAG; improve data quality |
+| Good on eval, bad in production | Unrepresentative eval set | Sample eval cases from real traffic |
+
+<Interview>
+<QA q="How would you build a fine-tuning dataset for a support assistant?">
+Start from real historical replies and expert-written examples, remove personal data, filter for quality, de-duplicate (including near-duplicates), balance intents and edge cases, format with the base model's chat template, split off a frozen test set, and have people review a random sample before training. Add reviewed synthetic data to cover gaps.
+</QA>
+<QA q="What is knowledge distillation and when is it worth it?">
+Training a small student model on a large teacher model's outputs for your task. It's worth it at high, steady volume where the student reaches acceptable quality on your eval set, often cutting cost by more than half — with routing of hard cases back to the teacher.
+</QA>
+</Interview>
+
+<Takeaways>
+- Data quality, coverage and de-duplication matter more than hyperparameters.
+- Use synthetic data deliberately, ground it in real data, and review it.
+- LoRA/QLoRA are the defaults; DoRA and rsLoRA can add quality; multi-LoRA serving makes per-task models cheap.
+- Distillation turns expensive large-model behaviour into cheap small models; reinforcement fine-tuning optimises against verifiable rewards.
+</Takeaways>

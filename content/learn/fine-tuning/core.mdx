@@ -1,0 +1,214 @@
+---
+summary: When to fine-tune (and when RAG or prompting is the right answer), what full fine-tuning costs, how LoRA works with the maths worked through, how QLoRA fits a 7B model on one GPU, preparing chat data, a complete QLoRA run with Hugging Face, hyperparameters, evaluation and the classic pitfalls.
+---
+
+## The adaptation ladder
+
+<Level l="intermediate" />
+
+Always climb from the cheapest rung. Most problems are solved before you reach fine-tuning.
+
+| Approach | Changes weights? | Cost | Use when |
+|---|---|---|---|
+| Prompt engineering | No | Minutes | Always first |
+| Few-shot examples | No | Minutes | Format and style |
+| RAG | No | Days | The model needs private or fresh knowledge |
+| **PEFT / LoRA fine-tuning** | A small adapter | Hours, one GPU | Consistent behaviour, format, tone, domain jargon; a cheaper small model replacing a big one |
+| Full fine-tuning | All weights | Many GPUs | Large data, deep domain shift |
+| Pre-training from scratch | — | Millions of dollars | Almost never |
+
+<Tip title="RAG vs fine-tuning: the rule of thumb">
+**RAG teaches the model what to know; fine-tuning teaches it how to behave.** Use RAG for facts that change (policies, product catalogues). Use fine-tuning for style, output structure, classification labels, specialised reasoning patterns, or to distil a big model's behaviour into a small, fast one. They combine well: a fine-tuned model that's good at using retrieved context.
+</Tip>
+
+```mermaid caption="A quick way to choose. Most teams should stop at prompting or RAG; fine-tune when you have a narrow, stable behaviour to teach and the data to teach it."
+flowchart TD
+  A[Quality problem] --> B{Missing or changing<br/>knowledge?}
+  B -- yes --> RAG[Use RAG]
+  B -- no --> C{Fixable with better<br/>instructions or examples?}
+  C -- yes --> P[Prompt engineering + few-shot]
+  C -- no --> D{Narrow task, stable behaviour,<br/>500+ good examples?}
+  D -- yes --> FT[LoRA / QLoRA fine-tune]
+  D -- no --> E[Collect data first<br/>or use a stronger model]
+  FT --> F{Cost or latency<br/>the main issue?}
+  F -- yes --> DIS[Distil into a small model]
+```
+
+## Full fine-tuning and what it costs
+
+<Level l="intermediate" />
+
+Full fine-tuning continues training *all* the weights on your data. Memory for a 7B model with AdamW in mixed precision is about **16 bytes per parameter** (weights, gradients, two optimiser moments, a master copy) → **~112 GB**: several 80 GB GPUs. It also risks **catastrophic forgetting** of general abilities, and every task needs its own full copy of the model (14 GB+).
+
+## Parameter-efficient fine-tuning (PEFT)
+
+<Level l="intermediate" />
+
+Freeze the pre-trained weights and train a tiny number of new parameters instead:
+
+- **Adapters:** small bottleneck layers inserted inside each block.
+- **Prefix / prompt tuning:** learn "virtual token" embeddings prepended to the input.
+- **LoRA and its variants** (QLoRA, DoRA): low-rank updates to weight matrices — the dominant method.
+
+## LoRA: low-rank adaptation
+
+<Level l="intermediate" />
+
+The insight: the *change* in weights needed to adapt a model has low "intrinsic rank". So instead of learning a full update ΔW (d × d), learn two thin matrices **B** (d × r) and **A** (r × d) with a small rank r (4–64):
+
+```
+W' = W + ΔW = W + (α / r) · B · A
+```
+
+```mermaid caption="The big pre-trained matrix W stays frozen. Only the two thin matrices A and B are trained, and their product is added to W's output."
+flowchart LR
+  X[input x] --> W["W (d × d)<br/>FROZEN"]
+  X --> A["A (r × d)<br/>trainable"]
+  A --> B["B (d × r)<br/>trainable"]
+  W --> S((+))
+  B -->|"× α/r"| S
+  S --> Y[output h]
+```
+
+<Example title="Worked example: parameter savings">
+One 4,096 × 4,096 attention projection has **16.8M** parameters. LoRA with r = 8 trains B (4,096 × 8) + A (8 × 4,096) = **65,536** parameters — 0.39%.
+
+Applied to the q, k, v and o projections in all 32 layers of a 7B model: 128 matrices × 65,536 ≈ **8.4M trainable parameters** instead of 7 billion. The adapter file is a few tens of MB.
+</Example>
+
+Details that matter:
+
+- **Initialisation:** A is random and B is zero, so B·A = 0 at the start and training begins exactly from the base model.
+- **α (alpha):** a scaling factor; α = 2r is a common setting.
+- **Target modules:** the attention projections (`q_proj`, `v_proj`, …) and often the MLP layers (`gate_proj`, `up_proj`, `down_proj`) for more capacity.
+- **Merging:** after training, compute W + (α/r)·B·A once: zero extra inference latency. Or keep adapters separate and hot-swap many task adapters on one base model.
+
+## QLoRA: fine-tuning on a single GPU
+
+<Level l="intermediate" />
+
+**QLoRA** is LoRA on top of a base model [quantised](/learn/how-llms-work/deep-dive/) to 4 bits:
+
+1. **4-bit NormalFloat (NF4):** a data type designed for normally distributed weights.
+2. **Double quantisation:** the quantisation constants are quantised too.
+3. **Paged optimisers:** optimiser state spills to CPU RAM during memory spikes.
+
+The frozen base sits in 4-bit (7B → ~4 GB), computation happens in bf16, and only the LoRA weights get gradients. A 7–8B model fine-tunes on a single 16–24 GB GPU (small runs even on a free Colab T4) with quality close to 16-bit LoRA.
+
+| Method | GPU memory for a 7B model (approx.) |
+|---|---|
+| Full fine-tuning (bf16 + AdamW) | 110+ GB |
+| LoRA (bf16 base) | ~18–20 GB |
+| **QLoRA (4-bit base)** | **~6–10 GB** |
+
+## Preparing fine-tuning data
+
+<Level l="intermediate" />
+
+**Quality beats quantity:** 500–5,000 excellent examples usually beat 100,000 noisy ones. Use the chat format the base model expects:
+
+```json title="train.jsonl (one line, formatted)"
+{"messages": [
+  {"role": "system", "content": "You are SupportBot for Acme Telecom. Be concise and empathetic."},
+  {"role": "user", "content": "My internet has been down since morning!!"},
+  {"role": "assistant", "content": "I'm sorry about the outage. Let me check: could you share your account number or registered mobile? Meanwhile, please restart your router by unplugging it for 30 seconds."}
+]}
+```
+
+Checklist: a consistent format; diverse inputs covering edge cases; **no personal data**; a held-out evaluation set; de-duplicated; matching the base model's chat template. The [deep dive](/learn/fine-tuning/deep-dive/) covers data curation in depth.
+
+## QLoRA in code
+
+<Level l="advanced" />
+
+```python title="qlora_train.py"
+import torch
+from datasets import load_dataset
+from peft import LoraConfig, prepare_model_for_kbit_training
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from trl import SFTConfig, SFTTrainer
+
+base = "Qwen/Qwen2.5-1.5B-Instruct"        # fits a free T4; scale up to 7–8B on a 24 GB GPU
+bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                         bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+tok = AutoTokenizer.from_pretrained(base)
+model = AutoModelForCausalLM.from_pretrained(base, quantization_config=bnb, device_map="auto")
+model = prepare_model_for_kbit_training(model)
+
+lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
+                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+data = load_dataset("json", data_files={"train": "train.jsonl", "eval": "eval.jsonl"})
+
+cfg = SFTConfig(output_dir="qlora-out", num_train_epochs=3, per_device_train_batch_size=4,
+                gradient_accumulation_steps=4, learning_rate=2e-4, lr_scheduler_type="cosine",
+                warmup_ratio=0.05, logging_steps=10, eval_strategy="epoch", save_strategy="epoch",
+                bf16=True, max_length=1024, gradient_checkpointing=True)
+trainer = SFTTrainer(model=model, args=cfg, train_dataset=data["train"], eval_dataset=data["eval"],
+                     peft_config=lora, processing_class=tok)
+trainer.model.print_trainable_parameters()   # e.g. trainable ~18M || all 1.5B || ~1.2%
+trainer.train()
+trainer.save_model("qlora-out/adapter")
+```
+
+<Note title="Library versions">
+TRL and PEFT change quickly; argument names (for example `max_length` vs the older `max_seq_length`) move between versions. If a snippet errors, check the current docs of the version you installed.
+</Note>
+
+### Using and merging the adapter
+
+```python title="merge.py"
+from peft import PeftModel
+
+base_model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16, device_map="auto")
+ft = PeftModel.from_pretrained(base_model, "qlora-out/adapter")
+merged = ft.merge_and_unload()               # a single model, no extra latency
+merged.save_pretrained("support-bot-merged")
+tok.save_pretrained("support-bot-merged")
+```
+
+## Key LoRA hyperparameters
+
+<Level l="intermediate" />
+
+| Parameter | Typical | Notes |
+|---|---|---|
+| Rank r | 8–64 | Higher = more capacity and more memory |
+| Alpha | 2 × r | Scales the adapter's output |
+| Learning rate | 1e-4 – 2e-4 | About 10× higher than full fine-tuning |
+| Epochs | 1–3 | More → overfitting and forgetting |
+| Effective batch size | 16–64 | Via gradient accumulation |
+| Max sequence length | Fit your data | Longer = more memory |
+
+## Evaluating a fine-tuned model
+
+<Level l="intermediate" />
+
+- **Task metrics** on the held-out set: exact match, F1, ROUGE for summaries, JSON validity rate.
+- **LLM-as-judge pairwise comparison** against the base model on 100+ prompts.
+- **Regression checks** on general abilities: did it forget how to do basic tasks?
+- **Human review** of a sample.
+
+Always compare three contenders on the same eval set: base model + good prompt, base model + RAG (if knowledge is involved), and the fine-tuned model. [Project 01](/projects/policypal-hr-assistant/) does exactly this.
+
+<Pitfall title="Common fine-tuning mistakes">
+Training on the prompt tokens as well as the responses (mask the prompt in the loss; TRL does this for chat data); using a different chat template at inference than in training; too many epochs, so the model parrots training examples; evaluating on training data; and fine-tuning to inject facts that belong in RAG.
+</Pitfall>
+
+<Interview>
+<QA q="Why does LoRA work?">
+The weight updates needed to adapt a model have low intrinsic rank, so the product of two thin matrices captures most of the necessary change with under 1% of the parameters, while the original weights stay frozen.
+</QA>
+<QA q="What does QLoRA add on top of LoRA?">
+A 4-bit NF4-quantised frozen base model, plus double quantisation and paged optimisers. That cuts memory roughly another 3×, so 7B+ models fine-tune on a single consumer GPU with quality close to 16-bit LoRA.
+</QA>
+<QA q="A stakeholder wants to fine-tune a model on the company handbook so it 'knows' the policies. What do you say?">
+Use RAG instead: facts change, fine-tuning doesn't reliably store them, and RAG gives citations and instant updates. Fine-tune only if the problem is behaviour — tone, format, a narrow task — or cost.
+</QA>
+</Interview>
+
+<Takeaways>
+- Climb the ladder: prompting → few-shot → RAG → LoRA/QLoRA → full fine-tuning.
+- RAG for knowledge, fine-tuning for behaviour; they combine well.
+- LoRA trains two thin matrices beside frozen weights; QLoRA does it on a 4-bit base so 7B models fit on one GPU.
+- Data quality and honest evaluation against strong baselines decide whether fine-tuning was worth it.
+</Takeaways>

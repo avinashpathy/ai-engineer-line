@@ -1,0 +1,576 @@
+---
+summary: Call LLMs like a professional — request anatomy, multi-turn state, stop reasons, streaming, token counting and pricing, structured outputs, tool calling end to end, images and PDFs, prompt caching, batch APIs, retries and rate limits, async concurrency, gateways and fallbacks, cloud providers, a production-ready client, and API security.
+---
+
+## The anatomy of a chat request
+
+<Level l="beginner" />
+
+Calling a model is one line of code. Calling it **reliably, cheaply, securely and observably** at production scale is a skill in its own right, and it's what this lesson covers.
+
+<Note title="Model names">
+Examples define `MODEL = "..."` constants. Replace them with current model identifiers from your provider's documentation; the patterns stay the same.
+</Note>
+
+Every major provider uses the same core shape:
+
+| Element | Purpose |
+|---|---|
+| `model` | Which model to run |
+| `system` (or a system message) | Standing instructions: role, rules, output format |
+| `messages` | The conversation, as alternating user and assistant turns |
+| `max_tokens` | Upper bound on output length — also a cost cap |
+| `temperature`, `top_p` | Sampling randomness ([How LLMs work](/learn/how-llms-work/core/)) |
+| `tools` | Functions the model may ask you to run |
+| `stop_sequences` | Strings that end generation early |
+| metadata / user ID | Attribution and abuse monitoring |
+
+**The API is stateless.** The model remembers nothing between calls. Your application sends the whole relevant conversation every time. That's why [context management](/learn/context-engineering/) and token costs matter so much.
+
+## First calls with two SDKs
+
+<Level l="beginner" />
+
+```python title="first_calls.py"
+# pip install anthropic openai python-dotenv
+from dotenv import load_dotenv; load_dotenv()          # reads API keys from .env
+from anthropic import Anthropic
+from openai import OpenAI
+
+CLAUDE_MODEL = "claude-sonnet-4-5"                      # replace with current names
+OPENAI_MODEL = "gpt-4o-mini"
+
+anthropic_client = Anthropic()                          # uses ANTHROPIC_API_KEY
+resp = anthropic_client.messages.create(
+    model=CLAUDE_MODEL, max_tokens=300, temperature=0.2,
+    system="You are a concise senior backend engineer.",
+    messages=[{"role": "user", "content": "Explain idempotency keys in 3 sentences."}])
+print(resp.content[0].text)
+print(resp.usage.input_tokens, resp.usage.output_tokens, resp.stop_reason)
+
+openai_client = OpenAI()                                # uses OPENAI_API_KEY
+r = openai_client.chat.completions.create(
+    model=OPENAI_MODEL, temperature=0.2, max_tokens=300,
+    messages=[{"role": "system", "content": "You are a concise senior backend engineer."},
+              {"role": "user", "content": "Explain idempotency keys in 3 sentences."}])
+print(r.choices[0].message.content, r.usage.prompt_tokens, r.usage.completion_tokens)
+```
+
+### Multi-turn conversations
+
+```python title="multi_turn.py"
+history = []
+
+def chat(user_text: str, system: str = "You are a helpful assistant.") -> str:
+    history.append({"role": "user", "content": user_text})
+    resp = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=500,
+                                            system=system, messages=history)
+    reply = resp.content[0].text
+    history.append({"role": "assistant", "content": reply})
+    return reply
+
+chat("My name is Avi and I work on HR integrations.")
+print(chat("What kind of work did I say I do?"))   # works only because we resend the history
+```
+
+### Always check why generation stopped
+
+| `stop_reason` (Anthropic) / `finish_reason` (OpenAI) | Meaning | Action |
+|---|---|---|
+| `end_turn` / `stop` | Finished naturally | Use the output |
+| `max_tokens` / `length` | Hit the output cap — the answer is **truncated** | Raise `max_tokens`, ask for shorter output, or continue |
+| `tool_use` / `tool_calls` | The model wants a tool run | Run it and send the result back |
+| `stop_sequence` | A stop string matched | Expected for some formats |
+
+<Pitfall title="Silent truncation">
+A JSON response cut off by `max_tokens` fails to parse, and a summary cut off mid-sentence looks like a model error. Log `stop_reason` on every call and alert when the truncation rate rises.
+</Pitfall>
+
+## Streaming
+
+<Level l="beginner" />
+
+Streaming sends tokens as they're generated. Total time is the same, but users see the first words in a fraction of a second instead of waiting 5–10 seconds. It improves *perceived* latency; it doesn't reduce cost.
+
+```python title="streaming.py"
+with anthropic_client.messages.stream(
+        model=CLAUDE_MODEL, max_tokens=800,
+        messages=[{"role": "user", "content": "Write a short design doc outline for a webhook service."}]) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+    final = stream.get_final_message()                  # full message + usage when it ends
+print("\n", final.usage)
+
+stream = openai_client.chat.completions.create(
+    model=OPENAI_MODEL, stream=True,
+    messages=[{"role": "user", "content": "Write two lines about retries."}])
+for chunk in stream:
+    delta = chunk.choices[0].delta.content if chunk.choices else None
+    if delta:
+        print(delta, end="", flush=True)
+```
+
+The two latency numbers that matter: **time to first token (TTFT)** and **tokens per second**. To stream to a browser, forward the chunks over [Server-Sent Events](/learn/python-backend/apis-async-streaming/).
+
+## Tokens, pricing and cost
+
+<Level l="beginner" />
+
+Providers bill **input tokens**, **output tokens** (usually 3–5× pricier) and, where caching is used, **cache writes** and much cheaper **cache reads**. Count tokens before you send, and log actual usage after.
+
+```python title="cost.py"
+count = anthropic_client.messages.count_tokens(
+    model=CLAUDE_MODEL, system="You are a helpful assistant.",
+    messages=[{"role": "user", "content": "Hello there, how are you?"}])
+print(count.input_tokens)
+
+import tiktoken                                        # OpenAI-family tokeniser; an approximation for others
+enc = tiktoken.get_encoding("o200k_base")
+print(len(enc.encode("Hello there, how are you?")))
+
+PRICES = {CLAUDE_MODEL: (3.00, 15.00), OPENAI_MODEL: (0.15, 0.60)}   # USD per million tokens (illustrative)
+
+def cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
+    p_in, p_out = PRICES[model]
+    return tokens_in / 1e6 * p_in + tokens_out / 1e6 * p_out
+```
+
+<Example title="Worked example: the monthly cost of one feature">
+A support-ticket summariser: 50,000 calls a day, 2,000 input + 250 output tokens each.
+
+- At $3 / $15 per million tokens: 0.006 + 0.00375 = **$0.00975 per call** → $487/day ≈ **$14,600/month**.
+- On a small model at $0.15 / $0.60: 0.0003 + 0.00015 = **$0.00045 per call** → ≈ **$675/month**.
+
+A 21× difference. Check whether the small model meets your quality bar on the eval set before deciding.
+</Example>
+
+Prices change often and differ by provider and region. Keep them in config, not scattered in code.
+
+## Structured outputs
+
+<Level l="intermediate" />
+
+Production code needs **data**, not prose. Three ways to get it, from most to least reliable:
+
+### 1. Native structured outputs (JSON-schema mode)
+
+```python title="structured_openai.py"
+from typing import Literal
+from pydantic import BaseModel, Field
+
+class TicketTriage(BaseModel):
+    category: Literal["billing", "technical", "account", "other"]
+    priority: Literal["low", "medium", "high"]
+    summary: str = Field(description="max 20 words")
+    needs_human: bool
+
+completion = openai_client.chat.completions.parse(      # older SDKs: client.beta.chat.completions.parse
+    model=OPENAI_MODEL,
+    messages=[{"role": "system", "content": "Triage support tickets."},
+              {"role": "user", "content": "I was charged twice this month and the app logs me out constantly!"}],
+    response_format=TicketTriage)
+t: TicketTriage = completion.choices[0].message.parsed
+print(t.category, t.priority, t.needs_human)
+```
+
+Several providers now offer schema-guaranteed output; check your provider's docs for its current form.
+
+### 2. A forced tool call (works across providers)
+
+Define a "tool" whose input schema *is* your output structure, and force the model to call it:
+
+```python title="structured_tool.py"
+tool = {"name": "record_triage", "description": "Record the triage result for a support ticket.",
+        "input_schema": TicketTriage.model_json_schema()}
+resp = anthropic_client.messages.create(
+    model=CLAUDE_MODEL, max_tokens=400, tools=[tool],
+    tool_choice={"type": "tool", "name": "record_triage"},          # force this tool
+    messages=[{"role": "user", "content": "Ticket: I was charged twice this month and the app logs me out!"}])
+data = next(b.input for b in resp.content if b.type == "tool_use")
+triage = TicketTriage.model_validate(data)                           # validate anyway
+```
+
+### 3. Prompted JSON + validation + retry
+
+The universal fallback for any model, including small self-hosted ones:
+
+```python title="extract_with_retry.py"
+from pydantic import BaseModel, ValidationError
+
+class Invoice(BaseModel):
+    vendor: str
+    invoice_no: str
+    total: float
+    currency: str
+
+def extract_with_retry(text: str, llm, max_tries: int = 3) -> Invoice:
+    prompt = f"Extract invoice fields as JSON matching {Invoice.model_json_schema()}.\n<doc>{text}</doc>"
+    for _ in range(max_tries):
+        raw = llm(prompt)
+        try:
+            return Invoice.model_validate_json(raw)
+        except ValidationError as e:
+            prompt += f"\nYour previous output was invalid: {e.errors()[:2]}. Return corrected JSON only."
+    raise ValueError("could not extract a valid invoice")
+```
+
+For self-hosted models, constrained-decoding libraries (Outlines, xgrammar, guidance) restrict generation to a schema so the output is always valid.
+
+<Tip title="Design schemas for models">
+Use `Literal`/enums for categories, add field descriptions, keep nesting shallow, make uncertain fields nullable and tell the model to use null rather than guess. If you want the model to think before answering, put a `reasoning` or `evidence` field *before* the answer fields.
+</Tip>
+
+## Tool calling, end to end
+
+<Level l="intermediate" />
+
+With **tool calling**, the model returns a function name and arguments; *your code* runs the function and sends the result back; the model continues. This loop is the core of every [agent](/learn/agent-foundations/).
+
+```mermaid caption="The model never runs code itself. It asks; your application decides whether and how to run the tool, then returns the result."
+sequenceDiagram
+  participant U as User
+  participant App as Your app
+  participant M as Model
+  participant T as Tool (your function)
+  U->>App: "Order ORD-10293 arrived damaged"
+  App->>M: messages + tool definitions
+  M-->>App: tool_use: get_order_status(order_id="ORD-10293")
+  App->>T: run it (with auth + validation)
+  T-->>App: {"status": "delivered"}
+  App->>M: tool_result
+  M-->>App: tool_use: create_return(...)
+  App->>T: run it
+  T-->>App: {"return_id": "RET-881"}
+  App->>M: tool_result
+  M-->>App: final text answer
+  App-->>U: "I've started return RET-881…"
+```
+
+```python title="tools.py"
+import json
+
+tools = [
+    {"name": "get_order_status",
+     "description": "Look up the status of a customer's order by order ID. Returns status, carrier and ETA.",
+     "input_schema": {"type": "object",
+                      "properties": {"order_id": {"type": "string", "description": "e.g. ORD-10293"}},
+                      "required": ["order_id"]}},
+    {"name": "create_return",
+     "description": "Create a return request for a delivered order. Only use after confirming the order is delivered.",
+     "input_schema": {"type": "object",
+                      "properties": {"order_id": {"type": "string"}, "reason": {"type": "string"}},
+                      "required": ["order_id", "reason"]}},
+]
+
+def get_order_status(order_id): return {"order_id": order_id, "status": "delivered", "eta": None}
+def create_return(order_id, reason): return {"return_id": "RET-881", "order_id": order_id}
+REGISTRY = {"get_order_status": get_order_status, "create_return": create_return}
+
+def run_with_tools(user_msg: str, max_rounds: int = 5) -> str:
+    messages = [{"role": "user", "content": user_msg}]
+    for _ in range(max_rounds):                         # a stop condition: never loop forever
+        resp = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=800,
+                                                tools=tools, messages=messages)
+        if resp.stop_reason != "tool_use":
+            return "".join(b.text for b in resp.content if b.type == "text")
+        messages.append({"role": "assistant", "content": resp.content})
+        results = []
+        for block in resp.content:                     # the model may request several tools at once
+            if block.type != "tool_use":
+                continue
+            try:
+                out = REGISTRY[block.name](**block.input)
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(out)})
+            except Exception as e:                     # errors go back so the model can recover
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": f"Error: {e}", "is_error": True})
+        messages.append({"role": "user", "content": results})
+    return "Sorry, I couldn't complete that request."
+
+print(run_with_tools("Order ORD-10293 arrived damaged. Please start a return."))
+```
+
+The OpenAI equivalent uses `tools=[{"type": "function", "function": {...}}]`, reads `message.tool_calls`, and replies with `{"role": "tool", "tool_call_id": ..., "content": ...}` messages. The control flow is identical.
+
+<Pitfall title="The model chooses; your code decides">
+Treat tool arguments as untrusted input. Validate them, enforce the user's permissions inside the tool, and require confirmation before anything irreversible. The [support chatbot project](/projects/support-chatbot/) shows the full pattern.
+</Pitfall>
+
+## Images and documents
+
+<Level l="intermediate" />
+
+```python title="vision.py"
+import base64
+
+img_b64 = base64.standard_b64encode(open("receipt.jpg", "rb").read()).decode()
+pdf_b64 = base64.standard_b64encode(open("contract.pdf", "rb").read()).decode()
+
+resp = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=800, messages=[{
+    "role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+        {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}},
+        {"type": "text", "text": "Does the receipt total match the amount in clause 4 of the contract?"}]}])
+```
+
+Images and PDF pages cost tokens. Resize images to the smallest resolution that still answers the question, and send only the relevant pages. More in [Multimodal AI](/learn/multimodal-voice/multimodal/).
+
+## Prompt caching
+
+<Level l="intermediate" />
+
+When many requests share a long prefix (system prompt, tool definitions, a policy document), providers can cache the processed prefix. Cached input is billed at a fraction of the normal price and starts faster.
+
+```python title="prompt_caching.py"
+policy = open("hr_policy.md").read()                   # e.g. 30k tokens, identical for every request
+resp = anthropic_client.messages.create(
+    model=CLAUDE_MODEL, max_tokens=500,
+    system=[{"type": "text", "text": "You answer HR policy questions using the policy below."},
+            {"type": "text", "text": policy, "cache_control": {"type": "ephemeral"}}],   # cache breakpoint
+    messages=[{"role": "user", "content": "How many casual leaves do I get?"}])
+print(resp.usage)       # cache_creation_input_tokens on the first call, cache_read_input_tokens afterwards
+```
+
+Rules: stable content first (tools, system prompt, documents), variable content last; any change in the prefix invalidates the cache; caches expire after a short idle time. Some providers cache long prefixes automatically — structure prompts the same way to benefit.
+
+<Example title="Worked example: caching savings">
+A 30,000-token policy prefix and 10,000 questions a day: 300M input tokens a day without caching. With cache reads billed at roughly 10% of the base price, the prefix costs about a tenth: around **90% less input spend**, and time to first token often halves.
+</Example>
+
+## Batch processing
+
+<Level l="intermediate" />
+
+For offline jobs — nightly classification, evaluation runs, backfills — batch APIs process large request sets asynchronously at a significant discount (often around 50%).
+
+```python title="batch.py"
+requests = [{"custom_id": f"ticket-{i}",
+             "params": {"model": CLAUDE_MODEL, "max_tokens": 200,
+                        "messages": [{"role": "user", "content": f"Classify: {text}"}]}}
+            for i, text in enumerate(tickets)]
+batch = anthropic_client.messages.batches.create(requests=requests)
+
+# later (poll, or schedule a job):
+status = anthropic_client.messages.batches.retrieve(batch.id)
+if status.processing_status == "ended":
+    for result in anthropic_client.messages.batches.results(batch.id):
+        if result.result.type == "succeeded":
+            print(result.custom_id, result.result.message.content[0].text)
+```
+
+## Reliability: errors, retries, timeouts, rate limits
+
+<Level l="intermediate" />
+
+| Error | Cause | Handling |
+|---|---|---|
+| 429 rate limit | Too many requests or tokens per minute | Exponential backoff with jitter, respect `retry-after`, queue requests, request higher limits |
+| 500 / 502 / 503 / 529 overloaded | Provider-side problem | Retry with backoff; **fall back** to another model or provider |
+| Timeout / connection error | Network | Retry; always set client timeouts |
+| 400 invalid request | Bad parameters, context too long | Don't retry; fix the input (trim context) |
+| 401 / 403 | Bad key or permission | Don't retry; alert |
+| Safety refusal | Content policy | Handle gracefully; don't loop |
+
+```python title="reliable_call.py"
+import logging, time
+import anthropic
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+log = logging.getLogger("llm")
+client = anthropic.Anthropic(max_retries=0, timeout=60.0)        # we control retries ourselves
+RETRYABLE = (anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.InternalServerError)
+
+@retry(retry=retry_if_exception_type(RETRYABLE), stop=stop_after_attempt(5),
+       wait=wait_exponential_jitter(initial=1, max=30), reraise=True)
+def call_llm(**kwargs):
+    t0 = time.perf_counter()
+    resp = client.messages.create(**kwargs)
+    log.info("llm_call model=%s in=%d out=%d stop=%s latency=%.2fs", kwargs["model"],
+             resp.usage.input_tokens, resp.usage.output_tokens, resp.stop_reason, time.perf_counter() - t0)
+    return resp
+```
+
+<Pitfall title="Retries multiply">
+The official SDKs also retry some errors automatically (`max_retries`). Pick **one** layer for retries: five SDK retries × five tenacity retries = 25 attempts and a very slow failure.
+</Pitfall>
+
+### Concurrency under rate limits
+
+```python title="concurrency.py"
+import asyncio
+from anthropic import AsyncAnthropic
+
+aclient = AsyncAnthropic()
+sem = asyncio.Semaphore(8)                            # stay under your rate limit
+
+async def classify(text: str) -> str:
+    async with sem:
+        r = await aclient.messages.create(
+            model=CLAUDE_MODEL, max_tokens=50,
+            messages=[{"role": "user", "content": f"Sentiment (positive/negative/neutral) of: {text}"}])
+        return r.content[0].text.strip()
+
+async def main(texts):
+    return await asyncio.gather(*(classify(t) for t in texts))
+
+labels = asyncio.run(main(["love it", "terrible support", "it's okay"]))
+```
+
+Rate limits are usually per minute in both **requests** and **tokens**. At scale, put requests through a queue with workers, spread load across keys or regions, and ask the provider for higher limits before launch.
+
+## Gateways, routing and fallbacks
+
+<Level l="intermediate" />
+
+Avoid hard-wiring one provider across your codebase. Options:
+
+1. **Your own thin interface:** a `generate(messages, tools, schema)` function with provider adapters behind it.
+2. **LiteLLM:** one OpenAI-style API for 100+ providers, with fallbacks, retries, cost tracking and a proxy-server mode.
+3. **Cloud gateways:** AWS Bedrock, Azure AI Foundry, or an API-management layer in front of several models.
+
+```python title="router.py"
+# pip install litellm
+from litellm import completion, Router
+
+r = completion(model="anthropic/claude-sonnet-4-5", messages=[{"role": "user", "content": "Hi"}])
+print(r.choices[0].message.content, r.usage)
+
+router = Router(
+    model_list=[
+        {"model_name": "smart", "litellm_params": {"model": "anthropic/claude-sonnet-4-5"}},
+        {"model_name": "smart", "litellm_params": {"model": "openai/gpt-4o"}},       # same alias = load-balance
+        {"model_name": "cheap", "litellm_params": {"model": "openai/gpt-4o-mini"}}],
+    fallbacks=[{"smart": ["cheap"]}], num_retries=2)                                  # fail over automatically
+resp = router.completion(model="smart", messages=[{"role": "user", "content": "Summarise RAG in one line."}])
+```
+
+**Model routing** sends easy requests to a cheap model and hard ones to a strong model; **fallbacks** retry on another model or provider when one fails. Both are covered with cost maths in the [How LLMs work deep dive](/learn/how-llms-work/deep-dive/).
+
+## AWS Bedrock and Azure OpenAI
+
+<Level l="intermediate" />
+
+Enterprises often prefer models through their cloud: existing contracts, data residency (an India region, say), private networking and IAM integration.
+
+```python title="cloud_models.py"
+import boto3                                          # AWS: credentials from an IAM role or environment
+bedrock = boto3.client("bedrock-runtime", region_name="ap-south-1")
+out = bedrock.converse(
+    modelId="anthropic.claude-3-5-sonnet-20240620-v1:0",   # check the Bedrock console for current IDs
+    system=[{"text": "You are concise."}],
+    messages=[{"role": "user", "content": [{"text": "What is a vector database?"}]}],
+    inferenceConfig={"maxTokens": 300, "temperature": 0.2})
+print(out["output"]["message"]["content"][0]["text"], out["usage"])
+
+from openai import AzureOpenAI                        # Azure: model = your deployment name
+az = AzureOpenAI(azure_endpoint="https://<resource>.openai.azure.com", api_version="2024-10-21",
+                 api_key="...")                       # prefer Entra ID (managed identity) over keys in production
+r = az.chat.completions.create(model="gpt-4o-mini-deployment", messages=[{"role": "user", "content": "Hi"}])
+```
+
+The [Cloud GenAI & LLMOps](/learn/cloud-llmops/) station goes deeper.
+
+## A production-ready LLM client
+
+<Level l="advanced" />
+
+Everything above in one reusable module: timeouts, targeted retries, forced-tool structured output with validation, and usage logging.
+
+```python title="llm_client.py"
+import json, logging, time
+from dataclasses import dataclass
+from typing import Optional, Type
+
+import anthropic
+from pydantic import BaseModel, ValidationError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+
+log = logging.getLogger("llm")
+
+@dataclass
+class LLMResult:
+    text: str
+    data: Optional[BaseModel]
+    input_tokens: int
+    output_tokens: int
+    latency_s: float
+    stop_reason: str
+
+class LLMClient:
+    def __init__(self, model: str, max_retries: int = 4, timeout: float = 60):
+        self.model = model
+        self.client = anthropic.Anthropic(max_retries=0, timeout=timeout)
+        self._call = retry(
+            retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIConnectionError,
+                                           anthropic.InternalServerError)),
+            stop=stop_after_attempt(max_retries), wait=wait_exponential_jitter(1, 30),
+            reraise=True)(self.client.messages.create)
+
+    def generate(self, prompt: str, system: str = "", schema: Type[BaseModel] | None = None,
+                 max_tokens: int = 1024, temperature: float = 0.0, trace_id: str = "-") -> LLMResult:
+        kwargs = dict(model=self.model, max_tokens=max_tokens, temperature=temperature,
+                      system=system, messages=[{"role": "user", "content": prompt}])
+        if schema:
+            kwargs["tools"] = [{"name": "respond", "description": "Return the answer.",
+                                "input_schema": schema.model_json_schema()}]
+            kwargs["tool_choice"] = {"type": "tool", "name": "respond"}
+        t0 = time.perf_counter()
+        resp = self._call(**kwargs)
+        dt = time.perf_counter() - t0
+        text = "".join(getattr(b, "text", "") for b in resp.content)
+        data = None
+        if schema:
+            raw = next(b.input for b in resp.content if b.type == "tool_use")
+            try:
+                data = schema.model_validate(raw)
+            except ValidationError as e:
+                log.warning("schema validation failed trace=%s err=%s", trace_id, e.errors()[:2])
+                raise
+        log.info(json.dumps({"trace": trace_id, "model": self.model, "in": resp.usage.input_tokens,
+                             "out": resp.usage.output_tokens, "latency_s": round(dt, 2),
+                             "stop": resp.stop_reason}))
+        return LLMResult(text, data, resp.usage.input_tokens, resp.usage.output_tokens, dt, resp.stop_reason)
+```
+
+## Security essentials
+
+<Level l="beginner" />
+
+- Keep keys in a secrets manager or environment variables — never in code, notebooks or front-end bundles.
+- **Call LLMs from your backend**, never directly from browsers or mobile apps with your key.
+- Use separate keys per environment and service; **rotate** them on a schedule and immediately after any leak; set spend limits and alerts.
+- Know the provider's data-retention and training policies; use enterprise or zero-retention options where required.
+- Log usage metadata (tokens, latency, model, stop reason). Don't log raw prompts containing personal data unless they're redacted and retention is controlled.
+
+## Build this
+
+<Level l="intermediate" />
+
+A **command-line chatbot** that brings the whole lesson together:
+
+1. A system prompt loaded from a versioned file.
+2. Streaming replies.
+3. A `/json` mode that returns validated structured output for the last message.
+4. A live **token and cost counter** after every message (input, output, cached, running total).
+5. Retries with backoff, a fallback model, and `stop_reason` warnings when output is truncated.
+
+Put it on GitHub with a README showing a sample session and the cost per 100 messages. It's the foundation for [Project 02](/projects/resume-jd-matcher/).
+
+<Interview>
+<QA q="How do you make LLM calls reliable in production?">
+Timeouts; retries with exponential backoff and jitter on retryable errors only; a fallback model or provider; structured-output validation with retry; stop_reason checks; concurrency limits; and logging of tokens, latency and errors.
+</QA>
+<QA q="How does prompt caching reduce cost?">
+It reuses the processed representation of an identical prompt prefix, so repeated long system prompts, tool definitions or documents are billed at a large discount and start faster. Put stable content first and variable content last.
+</QA>
+<QA q="Your JSON outputs occasionally fail to parse. What do you check?">
+First the stop reason — truncation from max_tokens is the most common cause. Then use native structured outputs or a forced tool call, validate with Pydantic, and retry with the validation error included.
+</QA>
+</Interview>
+
+<Takeaways>
+- APIs are stateless: you resend context every call, and tokens drive both cost and latency.
+- Streaming for user experience; structured outputs or forced tool calls for data; prompt caching for long shared prefixes; batch APIs for offline work.
+- Tool calling is a loop your code controls: validate arguments, enforce permissions, cap the rounds.
+- Wrap everything in one client with timeouts, targeted retries, validation, usage logging, fallbacks and provider abstraction.
+</Takeaways>

@@ -1,0 +1,305 @@
+---
+summary: Speech and voice AI from first principles — audio representations, speech recognition (CTC, wav2vec 2.0, Whisper) and word error rate, text-to-speech and voice cloning (with the responsibilities that come with it), fine-tuning Whisper, speaker diarisation and verification, audio classification, and designing a real-time voice agent against a latency budget.
+---
+
+## Audio fundamentals
+
+<Level l="intermediate" />
+
+Sound is air-pressure variation over time. A microphone samples it into numbers:
+
+- **Sample rate:** samples per second. Speech models typically use **16 kHz**; music 44.1 kHz; phone calls 8 kHz. You can only capture frequencies up to half the sample rate (the Nyquist limit).
+- **Bit depth:** precision of each sample (16-bit is common).
+- **Channels:** mono or stereo.
+
+A 10-second, 16 kHz mono clip is 160,000 numbers — too raw for most models, so we transform it.
+
+## Audio representations
+
+<Level l="intermediate" />
+
+- **Waveform:** raw amplitude over time.
+- **Spectrogram:** the Short-Time Fourier Transform (STFT) splits audio into short overlapping windows (~25 ms) and computes the frequency content of each — an *image* of frequency vs time.
+- **Mel spectrogram:** frequencies warped onto the **mel scale**, which mimics human hearing (we tell low frequencies apart much better than high ones). The standard input for modern speech models; Whisper uses 80 mel bins.
+- **MFCCs:** a compressed summary of the mel spectrum; classic features for older speech systems.
+
+```python title="features.py"
+import librosa, librosa.display, numpy as np, matplotlib.pyplot as plt
+
+y, sr = librosa.load("speech.wav", sr=16000)
+mel = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=400, hop_length=160, n_mels=80)
+mel_db = librosa.power_to_db(mel, ref=np.max)
+librosa.display.specshow(mel_db, sr=sr, hop_length=160, x_axis="time", y_axis="mel")
+plt.colorbar()
+mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)            # shape (13, frames)
+```
+
+Once audio is an image-like mel spectrogram, the CNNs and Transformers from earlier stations apply directly.
+
+## Automatic speech recognition (ASR)
+
+<Level l="intermediate" />
+
+ASR converts speech to text. The core difficulty: audio frames and output characters don't line up one-to-one — people speak at different speeds, pause, and say "ummm".
+
+| Era | Approach |
+|---|---|
+| 1980s–2010s | Hidden Markov models + Gaussian mixtures, with pronunciation dictionaries and n-gram language models |
+| 2014–2019 | Deep networks + CTC loss (DeepSpeech), RNN-Transducers |
+| 2020 | **wav2vec 2.0**: self-supervised pre-training on unlabelled audio, then fine-tuning with little labelled data |
+| 2022+ | **Whisper**: an encoder–decoder Transformer trained on 680k hours of weakly labelled multilingual audio |
+
+### CTC (Connectionist Temporal Classification)
+
+Audio produces far more frames (around 50 per second) than output characters. CTC lets the model emit, for every frame, either a character or a special **blank** (`_`), then applies a collapse rule: merge consecutive repeats, then remove blanks.
+
+<Example title="Worked example: CTC collapsing">
+Frame outputs: `c c _ a a _ _ t t` → merge repeats → `c _ a _ t` → remove blanks → **"cat"**.
+
+To spell a double letter like "loop", a blank must separate the two o's: `l o _ o p` → "loop" (whereas `l o o p` would collapse to "lop").
+</Example>
+
+The CTC loss sums the probabilities of *all* frame sequences that collapse to the correct transcript (computed efficiently with dynamic programming), so you never need frame-level alignment labels. Decoding is greedy (argmax per frame, then collapse) or beam search with an external n-gram language model (via `pyctcdecode` + KenLM), which fixes errors like "their" vs "there" and boosts domain vocabulary.
+
+### wav2vec 2.0 and self-supervised speech
+
+wav2vec 2.0 learns from **unlabelled** audio: a CNN encodes raw waveforms into latent frames, some frames are masked, and a Transformer learns to identify the correct representation of each masked frame among distractors. Fine-tuning with CTC on just 10 minutes to 10 hours of labelled speech then gives a usable recogniser — transformative for low-resource languages. HuBERT and WavLM refine the idea.
+
+```python title="wav2vec_ctc.py"
+import librosa, torch
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
+proc = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h")
+speech, _ = librosa.load("hello.wav", sr=16000)
+with torch.no_grad():
+    logits = model(proc(speech, sampling_rate=16000, return_tensors="pt").input_values).logits
+print(proc.batch_decode(logits.argmax(-1))[0])          # greedy CTC decoding
+```
+
+### Whisper
+
+The encoder reads 30-second log-mel spectrograms; the decoder generates text tokens, conditioned on special tokens for language, task (transcribe or translate) and timestamps. It's robust to accents and noise and supports ~99 languages, including Hindi, Kannada, Tamil and Telugu. Sizes run from tiny (39M) to large-v3 (1.5B); `faster-whisper` and `distil-whisper` run much faster.
+
+```python title="whisper_asr.py"
+from transformers import pipeline
+
+asr = pipeline("automatic-speech-recognition", model="openai/whisper-small",
+               chunk_length_s=30, device=0)                    # device=-1 for CPU
+out = asr("meeting.mp3", return_timestamps=True, generate_kwargs={"language": "english"})
+print(out["text"])
+for c in out["chunks"][:3]:
+    print(c["timestamp"], c["text"])
+```
+
+### Measuring ASR: word error rate
+
+```
+WER = (substitutions + deletions + insertions) / words in the reference
+```
+
+<Example title="Worked example: WER">
+Reference: "please cancel my order today" (5 words). Hypothesis: "please cancel the order".
+
+"my" → "the" is 1 substitution; "today" missing is 1 deletion. WER = 2/5 = **40%**.
+</Example>
+
+```python
+import jiwer
+print(jiwer.wer("please cancel my order today", "please cancel the order"))   # 0.4
+```
+
+Use **CER** (character error rate) for languages written without spaces, and normalise numbers and punctuation consistently before scoring.
+
+**Production concerns:** diarisation (who spoke when), voice activity detection to skip silence, streaming vs batch, domain vocabulary (product names, medical terms — use prompts/hotwords or fine-tune), and privacy (call audio contains personal data; redact transcripts).
+
+## Fine-tuning Whisper
+
+<Level l="advanced" />
+
+Fine-tune when your domain has accents, vocabulary or a language where the base model underperforms.
+
+```python title="whisper_finetune.py"
+from dataclasses import dataclass
+from datasets import Audio, load_dataset
+from transformers import (Seq2SeqTrainingArguments, WhisperForConditionalGeneration, WhisperProcessor)
+
+ds = load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="train[:2000]")   # Hindi example
+ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+proc = WhisperProcessor.from_pretrained("openai/whisper-small", language="hindi", task="transcribe")
+
+def prep(b):
+    a = b["audio"]
+    b["input_features"] = proc.feature_extractor(a["array"], sampling_rate=16000).input_features[0]
+    b["labels"] = proc.tokenizer(b["sentence"]).input_ids
+    return b
+ds = ds.map(prep, remove_columns=ds.column_names)
+
+@dataclass
+class Collator:
+    def __call__(self, feats):
+        batch = proc.feature_extractor.pad([{"input_features": f["input_features"]} for f in feats],
+                                           return_tensors="pt")
+        lab = proc.tokenizer.pad([{"input_ids": f["labels"]} for f in feats], return_tensors="pt")
+        labels = lab["input_ids"].masked_fill(lab.attention_mask.ne(1), -100)
+        if (labels[:, 0] == proc.tokenizer.bos_token_id).all():
+            labels = labels[:, 1:]
+        batch["labels"] = labels
+        return batch
+
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+model.generation_config.language, model.generation_config.task = "hindi", "transcribe"
+args = Seq2SeqTrainingArguments("whisper-hi", per_device_train_batch_size=16, learning_rate=1e-5,
+                                warmup_steps=200, max_steps=2000, fp16=True, predict_with_generate=True,
+                                eval_strategy="steps", eval_steps=500, generation_max_length=225)
+# Seq2SeqTrainer(model=model, args=args, train_dataset=ds, eval_dataset=eval_ds,
+#                data_collator=Collator(), compute_metrics=wer_metric).train()
+```
+
+Use a **low learning rate** (1e-5) to avoid forgetting; normalise text consistently before computing WER; LoRA works for Whisper too; and always compare against the zero-shot baseline on the same test set.
+
+## Text-to-speech (TTS)
+
+<Level l="intermediate" />
+
+The classic pipeline:
+
+1. **Text front-end:** normalise ("₹250" → "two hundred and fifty rupees", "Dr." → "doctor") and convert to phonemes.
+2. **Acoustic model:** phonemes → mel spectrogram (Tacotron 2, FastSpeech 2), predicting the duration, pitch and energy of each sound.
+3. **Vocoder:** mel spectrogram → waveform (WaveNet, HiFi-GAN).
+
+End-to-end models like VITS combine steps 2–3. Newer systems (Bark, XTTS, Parler-TTS, F5-TTS, Kokoro) use Transformer, diffusion or token-based approaches that treat audio as discrete tokens — like LLMs treat text — enabling expressive, multilingual speech.
+
+```python title="tts.py"
+import soundfile as sf
+from transformers import pipeline
+
+tts = pipeline("text-to-speech", model="facebook/mms-tts-eng")
+speech = tts("Your ticket has been resolved. Thank you for contacting support.")
+sf.write("reply.wav", speech["audio"].squeeze(), speech["sampling_rate"])
+```
+
+**Evaluation:** MOS (mean opinion score, human ratings 1–5), intelligibility (run ASR on the output and measure WER), speaker similarity, and latency (real-time factor).
+
+### Voice cloning
+
+- **Speaker embeddings:** a speaker encoder maps a voice sample to a vector capturing timbre and style; the TTS model is conditioned on it.
+- **Zero-shot cloning:** from 3–30 seconds of reference audio, no training (XTTS-v2, VALL-E-style models, OpenVoice).
+- **Fine-tuned cloning:** train on 30+ minutes of one speaker for higher fidelity.
+
+```python title="clone.py"
+# Coqui XTTS-v2 (pip install TTS) — zero-shot cloning with consent-given reference audio
+from TTS.api import TTS
+
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
+tts.tts_to_file(text="Namaste! Welcome to our support line.",
+                speaker_wav="consented_reference.wav", language="en", file_path="cloned.wav")
+```
+
+<Pitfall title="Responsible use of voice cloning">
+Cloned voices enable fraud (fake "CEO" calls authorising payments), impersonation and misinformation. Production systems must get **explicit consent** from the voice owner, **watermark** generated audio, **disclose** synthetic speech to listeners, restrict cloning of public figures, and log usage. Many jurisdictions now regulate deepfake audio. Treat it as a governance requirement ([Governance](/learn/governance/)), not an afterthought.
+</Pitfall>
+
+## Speakers: diarisation and verification
+
+<Level l="advanced" />
+
+**Diarisation** answers "who spoke when?": voice activity detection → split into segments → speaker embeddings per segment → cluster them into speakers → align with the ASR word timestamps.
+
+```python title="diarise.py"
+from pyannote.audio import Pipeline          # requires accepting the model terms on Hugging Face
+
+diar = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token="HF_TOKEN")
+result = diar("support_call.wav", num_speakers=2)
+for turn, _, speaker in result.itertracks(yield_label=True):
+    print(f"{turn.start:6.1f}s – {turn.end:6.1f}s  {speaker}")
+```
+
+Assign each transcribed word to the speaker segment containing its midpoint to get "AGENT: … / CUSTOMER: …". The metric is **DER** (diarisation error rate) = (missed speech + false alarm + speaker confusion) / total speech time.
+
+**Speaker verification** asks "is this the same person?": compare embeddings of an enrolment sample and a test sample; cosine similarity above a threshold means a match. Tune the threshold at the equal error rate. It's used for voice authentication — but it's vulnerable to cloned voices, so pair it with liveness and anti-spoofing checks.
+
+## Audio classification
+
+<Level l="advanced" />
+
+Machine faults, sirens, emotions, music genre: treat log-mel spectrograms as images.
+
+```python title="audio_cnn.py"
+import torch.nn as nn, torchaudio
+
+mel = torchaudio.transforms.MelSpectrogram(sample_rate=16000, n_fft=1024, hop_length=256, n_mels=64)
+to_db = torchaudio.transforms.AmplitudeToDB()
+
+class AudioCNN(nn.Module):
+    def __init__(self, n_classes):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(128, n_classes))
+
+    def forward(self, wav):                      # wav: (batch, samples)
+        return self.net(to_db(mel(wav)).unsqueeze(1))
+# Augment with SpecAugment (time/frequency masking), background-noise mixing and time shifts,
+# or fine-tune a pre-trained Audio Spectrogram Transformer.
+```
+
+## Designing a real-time voice agent
+
+<Level l="advanced" />
+
+```mermaid caption="Every stage streams into the next, so the agent starts speaking before it has finished thinking. Barge-in stops playback the moment the caller speaks."
+flowchart LR
+  MIC[Microphone] --> VAD[Voice activity<br/>detection]
+  VAD --> ASR[Streaming ASR]
+  ASR --> LLM[LLM<br/>streamed tokens]
+  LLM --> CH[Sentence chunker]
+  CH --> TTS[Streaming TTS]
+  TTS --> SPK[Speaker]
+  VAD -. user speaks .-> BI[Barge-in:<br/>stop TTS, flush audio]
+  BI -.-> TTS
+```
+
+| Stage | Typical latency budget | Tricks |
+|---|---|---|
+| End-of-speech detection | 200–500 ms | Tuned VAD; semantic end-of-turn models |
+| ASR final transcript | 100–300 ms | Streaming models, partial hypotheses |
+| LLM time to first token | 200–500 ms | Small/fast model, short prompts, prompt caching |
+| TTS first audio | 100–300 ms | Stream sentence by sentence |
+| **Total** | **≈ 0.6–1.5 s** | Overlap every stage; never wait for the full LLM answer |
+
+**Production concerns:** telephony audio is 8 kHz (resample, or use telephony-tuned models); background noise (noise suppression); interruptions and turn-taking; tool calls mid-conversation ("let me check your order" filler while the API runs); redacting personal data in transcripts; disclosing that the caller is speaking with AI; consent for recording. Frameworks such as Pipecat and LiveKit Agents, or speech-native realtime model APIs, handle much of the streaming plumbing. [Project 10](/projects/voice-receptionist/) builds a full voice receptionist.
+
+## Speech evaluation summary
+
+<Level l="intermediate" />
+
+| Task | Metrics |
+|---|---|
+| ASR | WER, CER, real-time factor |
+| Diarisation | DER |
+| Speaker verification | EER, minDCF |
+| TTS | MOS, intelligibility (ASR-WER of the output), speaker similarity, latency |
+| Audio classification | Accuracy, F1, mAP (multi-label) |
+| Voice agents | Task success, end-to-end latency, interruption handling, CSAT |
+
+<Interview>
+<QA q="How does CTC handle the alignment problem in speech recognition?">
+The model emits a character or blank for every audio frame; repeats are merged and blanks removed. The loss sums the probability of every frame sequence that collapses to the correct transcript, so no frame-level alignment labels are needed.
+</QA>
+<QA q="Where does the latency go in a voice agent, and how do you cut it?">
+End-of-speech detection, ASR, LLM time to first token and TTS first audio. Stream every stage, overlap them, send the first sentence to TTS as soon as it's complete, use a small fast model with prompt caching, and host close to users.
+</QA>
+<QA q="What safeguards does voice cloning need?">
+Explicit consent from the voice owner, watermarking, disclosure to listeners, restrictions on cloning public figures, usage logging — and never relying on voice alone for authentication.
+</QA>
+</Interview>
+
+<Takeaways>
+- Audio → mel spectrogram → treat it like an image or a sequence.
+- ASR: CTC models, wav2vec 2.0 and Whisper; measure with WER/CER; fine-tune Whisper for accents and vocabulary.
+- TTS: text normalisation → acoustic model → vocoder; measure with MOS. Voice cloning needs consent, watermarking and disclosure.
+- Diarisation = VAD + speaker embeddings + clustering; voice agents live or die by end-to-end latency.
+</Takeaways>

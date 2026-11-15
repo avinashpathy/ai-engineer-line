@@ -1,0 +1,238 @@
+---
+summary: Answer "which model should we use?" with evidence — what public benchmarks do and don't tell you, the dimensions to compare, a reusable async comparison harness, checkers, designing the comparison dataset, reading results, cascades and routing, non-functional checks, and re-benchmarking over time.
+---
+
+## Why leaderboards don't answer the question
+
+<Level l="intermediate" />
+
+"Which model should we use?" is one of the first questions on any GenAI project. Public leaderboards help you **shortlist**, but they rarely answer it for *your* task: benchmark questions leak into training data, and none of them look like your invoices, tickets or policies.
+
+| Public benchmark | Measures |
+|---|---|
+| MMLU / MMLU-Pro | Broad knowledge across 57+ subjects |
+| GPQA | Graduate-level science reasoning |
+| GSM8K, MATH, AIME | Mathematical reasoning |
+| HumanEval, MBPP, SWE-bench, LiveCodeBench | Coding |
+| IFEval | Instruction following |
+| Arena-style human preference (Elo) | Overall helpfulness |
+| MTEB | Embedding models (for retrieval) |
+
+Use them to pick three or four candidates. Then build your own comparison on 50–500 cases from real usage.
+
+## What to compare
+
+<Level l="intermediate" />
+
+| Dimension | Metrics |
+|---|---|
+| Quality | Task accuracy / pass rate, LLM-judge scores, schema validity, faithfulness |
+| Latency | Time to first token, total latency p50/p95, tokens per second |
+| Cost | **Per successful request**, not just per request |
+| Reliability | Error rate, refusal rate, variance across repeated runs |
+| Behaviour | Output length, instruction adherence, tone, language handling |
+| Operational | Context window, rate limits, regions and data residency, deprecation timelines, licence (open models) |
+
+## A model comparison harness
+
+<Level l="advanced" />
+
+A small async harness, using LiteLLM so every provider (and your own vLLM server) looks the same:
+
+```python title="compare_models.py"
+import asyncio, statistics, time
+from dataclasses import dataclass
+from litellm import acompletion
+
+CANDIDATES = {          # replace with current model identifiers and prices (USD per 1M tokens)
+    "large-a":    {"model": "anthropic/claude-sonnet-4-5", "price": (3.00, 15.00)},
+    "small-a":    {"model": "anthropic/claude-haiku-4-5",  "price": (1.00, 5.00)},
+    "small-b":    {"model": "openai/gpt-4o-mini",          "price": (0.15, 0.60)},
+    "open-local": {"model": "openai/Qwen/Qwen2.5-7B-Instruct", "price": (0.0, 0.0),
+                   "api_base": "http://localhost:8000/v1"},
+}
+
+@dataclass
+class Result:
+    case_id: str
+    model: str
+    output: str
+    latency_s: float
+    ttft_s: float
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    passed: bool | None = None
+    error: str | None = None
+
+async def run_one(name, cfg, case, system, sem) -> Result:
+    async with sem:
+        t0, ttft, parts = time.perf_counter(), None, []
+        try:
+            stream = await acompletion(model=cfg["model"], api_base=cfg.get("api_base"), stream=True,
+                                       stream_options={"include_usage": True}, temperature=0, max_tokens=800,
+                                       messages=[{"role": "system", "content": system},
+                                                 {"role": "user", "content": case["input"]}])
+            usage = None
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    ttft = ttft or time.perf_counter() - t0
+                    parts.append(chunk.choices[0].delta.content)
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+            tin, tout = (usage.prompt_tokens, usage.completion_tokens) if usage else (0, 0)
+            p_in, p_out = cfg["price"]
+            return Result(case["id"], name, "".join(parts), time.perf_counter() - t0, ttft or 0,
+                          tin, tout, tin / 1e6 * p_in + tout / 1e6 * p_out)
+        except Exception as e:
+            return Result(case["id"], name, "", time.perf_counter() - t0, 0, 0, 0, 0, error=str(e)[:200])
+
+async def compare(cases, system, checker, concurrency=6, repeats=1):
+    sem = asyncio.Semaphore(concurrency)
+    jobs = [run_one(n, c, case, system, sem)
+            for n, c in CANDIDATES.items() for case in cases for _ in range(repeats)]
+    results = await asyncio.gather(*jobs)
+    by_id = {c["id"]: c for c in cases}
+    for r in results:
+        if not r.error:
+            r.passed = checker(r.output, by_id[r.case_id])
+    return results
+
+def summarise(results):
+    rows = []
+    for name in CANDIDATES:
+        rs = [r for r in results if r.model == name]
+        ok = [r for r in rs if not r.error]
+        passed = [r for r in ok if r.passed]
+        lat = sorted(r.latency_s for r in ok) or [0]
+        total_cost = sum(r.cost_usd for r in ok)
+        rows.append({"model": name,
+                     "pass_rate": round(len(passed) / max(len(rs), 1), 3),
+                     "errors": len(rs) - len(ok),
+                     "p50_latency_s": round(statistics.median(lat), 2),
+                     "p95_latency_s": round(lat[int(0.95 * (len(lat) - 1))], 2),
+                     "median_ttft_s": round(statistics.median([r.ttft_s for r in ok] or [0]), 2),
+                     "avg_out_tokens": round(statistics.mean([r.tokens_out for r in ok] or [0])),
+                     "cost_per_1k_requests": round(1000 * total_cost / max(len(ok), 1), 3),
+                     "cost_per_1k_successes": round(1000 * total_cost / max(len(passed), 1), 3)})
+    return rows
+```
+
+### Checkers: how "passed" is decided
+
+```python title="checkers.py"
+import json, re
+from litellm import acompletion
+
+def json_field_checker(output: str, case: dict) -> bool:
+    """Extraction task: parse JSON and compare required fields with expected values."""
+    try:
+        data = json.loads(re.search(r"\{.*\}", output, re.S).group(0))
+    except Exception:
+        return False
+    return all(str(data.get(k, "")).strip().lower() == str(v).strip().lower()
+               for k, v in case["expected"].items())
+
+def contains_checker(output: str, case: dict) -> bool:
+    return all(term.lower() in output.lower() for term in case["must_contain"])
+
+async def judge_checker(output: str, case: dict, judge_model: str = "anthropic/claude-sonnet-4-5") -> bool:
+    r = await acompletion(model=judge_model, temperature=0, messages=[{"role": "user", "content":
+        f"Reference answer: {case['reference']}\nCandidate answer: {output}\n"
+        "Does the candidate convey the same key facts without contradictions? Reply only PASS or FAIL."}])
+    return r.choices[0].message.content.strip().upper().startswith("PASS")
+```
+
+<Tip>
+Prefer **deterministic checkers**. When you need an LLM judge, use a model family different from the candidates where possible (judges tend to favour their own family), and validate the judge against a human-labelled sample ([Evals](/learn/evaluation/)).
+</Tip>
+
+## Designing the comparison dataset
+
+<Level l="intermediate" />
+
+- 50–200 cases drawn from **real inputs** (anonymised), covering easy, typical, hard and edge cases.
+- Include the long inputs, messy formatting, other languages and adversarial inputs you'll see in production.
+- **Stratify** results by case type. A model can win overall but fail badly on one critical category.
+- **Repeat** runs (3×) on a subset to measure variance, especially at temperature above 0.
+
+## Reading the results
+
+<Level l="intermediate" />
+
+<Example title="Worked example: an extraction task (illustrative numbers)">
+| Model | Pass rate | p95 latency | Cost / 1k requests | Cost / 1k successes |
+|---|---|---|---|---|
+| large-a | 0.96 | 4.1 s | $9.80 | $10.21 |
+| small-a | 0.93 | 1.9 s | $3.10 | $3.33 |
+| small-b | 0.88 | 2.3 s | $0.42 | $0.48 |
+| open-local | 0.81 | 1.2 s | infrastructure | — |
+
+**Reading:** small-a reaches 97% of large-a's quality at a third of the cost and half the latency. small-b is far cheaper but fails 12% of cases — and its failures are concentrated in multi-page invoices. A **cascade** can absorb them: try small-b first, validate the schema and totals, and escalate failures to small-a.
+
+Expected cost ≈ 0.42 + 0.12 × 3.10 ≈ **$0.79 per 1,000** at a combined pass rate near 0.93. That beats choosing any single model.
+</Example>
+
+## Cascades and routing
+
+<Level l="advanced" />
+
+```python title="cascade.py"
+async def cascade(input_text, validators, models=("small-b", "small-a", "large-a")):
+    for name in models:
+        r = await run_one(name, CANDIDATES[name], {"id": "live", "input": input_text}, SYSTEM,
+                          asyncio.Semaphore(1))
+        if not r.error and all(v(r.output) for v in validators):
+            return r                                   # the first model whose output validates wins
+    raise RuntimeError("all models failed validation")
+```
+
+```mermaid caption="A cascade escalates only the requests a cheaper model couldn't handle. It needs cheap, reliable validators to know when to escalate."
+flowchart LR
+  Q[Request] --> S[Small, cheap model]
+  S --> V1{Validators pass?<br/>schema · rules · tests}
+  V1 -- yes --> OUT[Return answer]
+  V1 -- no --> M[Mid-size model]
+  M --> V2{Validators pass?}
+  V2 -- yes --> OUT
+  V2 -- no --> L[Large model]
+  L --> OUT
+```
+
+Cascades work when you have **cheap validators**: schema checks, business rules, unit tests, or a confidence signal. Without validators, use a **router** — a small classifier or prompted model that predicts difficulty and picks the model up front — and measure the router's own accuracy.
+
+## Non-functional checks
+
+<Level l="intermediate" />
+
+| Check | Why |
+|---|---|
+| Rate limits and quotas at your peak load | A model you can't get capacity for isn't an option |
+| Region availability / data residency | Regulatory requirements (e.g. processing in India) |
+| Data-usage terms (retention, training) | Confidentiality |
+| Deprecation schedule | Don't build on a model retiring next quarter |
+| Tool-calling and structured-output support | Needed for agents and extraction |
+| Context window and long-context quality | Document-heavy tasks |
+| Licence (open models) | Commercial-use restrictions |
+
+## Re-benchmark regularly
+
+<Level l="beginner" />
+
+Models, prices and your traffic all change. Keep the harness in your repo, re-run it when a new model ships or prices change, and **record results with dates**. Over time this becomes one of your team's most valuable assets: an objective, task-specific view of the model landscape. Pin exact model versions in production and log which version served each request, so an upgrade is a measured decision rather than a surprise.
+
+<Interview>
+<QA q="How would you choose an LLM for a new feature?">
+Shortlist three or four models from public benchmarks and constraints (data residency, licence, tool support). Build a 50–200-case eval set from real inputs, run all candidates with the same prompt, and compare pass rate, p95 latency, cost per successful request and failure categories. Then consider a cascade or router.
+</QA>
+<QA q="Why compare cost per successful request rather than cost per request?">
+A cheap model that fails often needs retries, escalations or human fixes. Cost per success captures the real cost of getting a correct answer.
+</QA>
+</Interview>
+
+<Takeaways>
+- Public benchmarks shortlist; your own data decides.
+- Compare quality, latency, cost per successful request, reliability and operational constraints.
+- A simple async harness with deterministic checkers answers "which model?" in an afternoon.
+- Cascades with cheap validators often beat any single model on cost at near-top quality. Re-benchmark on every model or price change.
+</Takeaways>

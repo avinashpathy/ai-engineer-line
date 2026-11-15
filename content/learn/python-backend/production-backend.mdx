@@ -1,0 +1,359 @@
+---
+summary: The backend pieces every real AI product needs — authentication with JWT and OAuth 2.0, choosing SQL or NoSQL, transactions, Redis caching, queues and background workers, WebSockets, pagination, file uploads, rate limiting and structured logging — in one reference architecture.
+---
+
+## The shape of a production AI backend
+
+<Level l="intermediate" />
+
+A prototype is one Python file that calls a model. A product needs to know **who** is calling, **remember** things safely, **survive** slow and failing calls, and **tell you** when something breaks. This lesson covers the backend building blocks that turn the first into the second. You'll use every one of them in the [projects](/projects/).
+
+```mermaid caption="A typical AI backend. Fast requests are answered directly; slow work (ingesting documents, long agent runs) goes onto a queue for workers. Redis sits in front of the database and the model API to absorb repeated work."
+flowchart TD
+  C[Browser / mobile app] -->|HTTPS + JWT| GW[API gateway<br/>rate limits · TLS]
+  GW --> API[FastAPI service<br/>auth · validation · SSE / WebSocket]
+  API <--> R[(Redis<br/>cache · sessions · rate counters)]
+  API <--> DB[(PostgreSQL<br/>users · conversations · pgvector)]
+  API -->|enqueue job| Q[[Queue]]
+  Q --> W[Workers<br/>ingest · embed · long agent runs]
+  W <--> DB
+  W <--> S3[(Object storage<br/>uploaded files)]
+  API --> LLM[(Model APIs)]
+  W --> LLM
+  API -.-> OBS[(Logs · metrics · traces)]
+  W -.-> OBS
+```
+
+## Authentication: proving who the user is
+
+<Level l="intermediate" />
+
+**Authentication** answers "who are you?". **Authorisation** answers "what are you allowed to do?". AI apps need both: a support bot must only show *your* orders, and an HR assistant must only fetch *your* leave balance.
+
+### JSON Web Tokens (JWT)
+
+After a user signs in, the server issues a **JWT**: a small, signed piece of JSON (user ID, roles, expiry) that the client sends with every request in the `Authorization: Bearer <token>` header. The server checks the signature instead of looking the session up in a database.
+
+A JWT has three dot-separated parts: header, payload and signature. The payload is only base64-encoded, **not encrypted**: anyone can read it, so never put secrets in it. The signature is what stops anyone from changing it.
+
+```python title="auth.py"
+import os, time, jwt                      # pip install pyjwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+SECRET = os.environ["JWT_SECRET"]         # long random value from a secret manager
+ALGO = "HS256"
+bearer = HTTPBearer()
+
+def issue_token(user_id: str, roles: list[str]) -> str:
+    now = int(time.time())
+    return jwt.encode({"sub": user_id, "roles": roles, "iat": now, "exp": now + 3600}, SECRET, algorithm=ALGO)
+
+def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    try:
+        claims = jwt.decode(creds.credentials, SECRET, algorithms=[ALGO])   # checks signature + expiry
+    except jwt.PyJWTError:
+        raise HTTPException(401, "Invalid or expired token")
+    return {"id": claims["sub"], "roles": claims.get("roles", [])}
+
+# In a route:  def get_orders(user = Depends(current_user)): ... use user["id"], never an ID from the request body
+```
+
+<Pitfall title="Common JWT mistakes">
+Always pass an explicit `algorithms=[...]` list (attackers once abused tokens claiming `alg: none`). Keep expiry short (minutes to an hour) and use refresh tokens for longer sessions. Store tokens in secure, `HttpOnly` cookies or memory, not in `localStorage` where any injected script can read them.
+</Pitfall>
+
+### OAuth 2.0 and "Sign in with Google"
+
+**OAuth 2.0** lets users sign in with an account they already have, and lets your app act on their behalf (read their calendar, post to their GitHub) **without ever seeing their password**. **OpenID Connect** is the identity layer on top that tells you who signed in.
+
+```mermaid caption="The authorization-code flow with PKCE, the recommended flow for web and mobile apps. The password only ever goes to the identity provider."
+sequenceDiagram
+  participant U as User
+  participant App as Your app
+  participant IdP as Google / GitHub
+  U->>App: Click "Sign in with Google"
+  App->>IdP: Redirect with client_id, scopes, code_challenge
+  U->>IdP: Sign in and approve the scopes
+  IdP->>App: Redirect back with a one-time code
+  App->>IdP: Exchange code + code_verifier for tokens
+  IdP-->>App: ID token (who) + access token (what it may do)
+  App-->>U: Signed in — app issues its own session
+```
+
+In practice you rarely build this yourself. Use a managed provider (Supabase Auth, Auth0, Clerk, Cognito, Entra ID) or a well-tested library. This site's own sign-in uses exactly this flow.
+
+**Machine-to-machine** calls (your agent calling an internal API) use the **client credentials** grant instead: the service exchanges its own ID and secret for a short-lived access token. [Project 08](/projects/openapi-mcp-server/) implements it.
+
+<Tip title="AI-specific rule">
+Agents must act with the **user's** permissions, not a super-user service account. Pass the user's identity through to every tool and let the downstream API enforce access. Then even a successful prompt injection can't reach data the user couldn't reach.
+</Tip>
+
+## SQL or NoSQL?
+
+<Level l="intermediate" />
+
+| | Relational (SQL) | Document / key-value (NoSQL) |
+|---|---|---|
+| Examples | PostgreSQL, MySQL, SQL Server | MongoDB, DynamoDB, Firestore, Redis |
+| Data shape | Tables with fixed columns and relations | Flexible JSON documents or key → value |
+| Strengths | Joins, constraints, transactions, ad-hoc analytics queries | Flexible schemas, very high write throughput, simple horizontal scaling |
+| Weaknesses | Schema changes need migrations; scaling writes takes work | Joins and cross-document consistency are harder; queries must be planned for |
+| AI fit | Users, conversations, feedback, evals, costs, plus vectors via **pgvector** | Chat logs at huge scale, caches, session state, event streams |
+
+<Tip title="A sensible default">
+Start with **PostgreSQL**. It handles relational data, JSON columns (`JSONB`) for flexible fields, full-text search *and* vector search in one database you already know how to back up. Add a specialised store only when you have a measured reason: Redis for caching, a dedicated vector database at very large scale, a document store for massive write volumes.
+</Tip>
+
+## Transactions and ACID
+
+<Level l="intermediate" />
+
+A **transaction** groups several writes so they all happen or none do. Relational databases guarantee **ACID**:
+
+| Letter | Means | Example |
+|---|---|---|
+| **A**tomicity | All writes succeed, or all are rolled back | Debit credits *and* record the usage, or neither |
+| **C**onsistency | Constraints always hold (foreign keys, checks) | A message can't point to a conversation that doesn't exist |
+| **I**solation | Concurrent transactions don't see each other's half-done work | Two requests can't both spend the user's last credit |
+| **D**urability | Once committed, data survives a crash | A confirmed booking isn't lost when the server restarts |
+
+```python title="credits.py"
+import psycopg
+
+def charge_and_log(conn: psycopg.Connection, user_id: str, cost: int, request_id: str) -> bool:
+    """Deduct LLM credits and record usage atomically. Returns False if the user can't afford it."""
+    with conn.transaction():                                   # COMMIT on success, ROLLBACK on any exception
+        row = conn.execute("SELECT credits FROM accounts WHERE user_id = %s FOR UPDATE",   # lock the row
+                           (user_id,)).fetchone()
+        if row is None or row[0] < cost:
+            return False
+        conn.execute("UPDATE accounts SET credits = credits - %s WHERE user_id = %s", (cost, user_id))
+        conn.execute("INSERT INTO usage_log (user_id, request_id, cost) VALUES (%s, %s, %s)",
+                     (user_id, request_id, cost))
+    return True
+```
+
+`FOR UPDATE` locks the row until the transaction ends, so two simultaneous requests can't both pass the balance check. Without it you'd get the classic **race condition**.
+
+## Caching with Redis
+
+<Level l="intermediate" />
+
+**Redis** is an in-memory data store: reads and writes take well under a millisecond. In AI apps it caches expensive results, holds session and conversation state, and counts requests for rate limiting.
+
+```python title="cache.py"
+import hashlib, json, redis
+
+r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
+
+def cached_answer(question: str, model: str, generate, ttl_s: int = 3600) -> str:
+    key = "ans:" + hashlib.sha256(f"{model}|{question.strip().lower()}".encode()).hexdigest()
+    if (hit := r.get(key)) is not None:
+        return hit                                  # cache hit: no model call, no cost
+    answer = generate(question)
+    r.set(key, answer, ex=ttl_s)                    # expire so stale answers don't live forever
+    return answer
+```
+
+This is an **exact-match** cache. A **semantic cache** matches questions by meaning using embeddings; you'll build one on the [RAG line](/learn/advanced-rag/). Whatever you cache, decide how it gets **invalidated**: when the source documents change, cached answers about them must go too.
+
+## Queues and background jobs
+
+<Level l="intermediate" />
+
+Some work is too slow for a web request: ingesting 500 PDFs, re-embedding a knowledge base, a 3-minute agent run, a nightly evaluation. Holding an HTTP connection open for minutes breaks on timeouts and wastes server capacity. Instead the API **enqueues a job** and returns immediately; **workers** pick jobs off the queue.
+
+| Tool | Good for |
+|---|---|
+| **arq** / **RQ** / **Celery** (with Redis) | Python background jobs in a single application |
+| **RabbitMQ** | Reliable task queues with routing between services |
+| **AWS SQS / Azure Service Bus / GCP Pub/Sub** | Managed queues; nothing to operate |
+| **Kafka** | High-volume event streams that many consumers read and replay |
+
+```python title="jobs.py"
+from arq import create_pool                  # pip install arq
+from arq.connections import RedisSettings
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.post("/documents/{doc_id}/ingest", status_code=202)
+async def ingest(doc_id: str):
+    pool = await create_pool(RedisSettings())
+    job = await pool.enqueue_job("ingest_document", doc_id, _job_id=f"ingest:{doc_id}")  # job id = dedupe key
+    return {"status": "queued", "job_id": job.job_id if job else f"ingest:{doc_id}"}
+
+# worker.py — run with:  arq worker.WorkerSettings
+async def ingest_document(ctx, doc_id: str):
+    text = await parse_file(doc_id)
+    chunks = chunk(text)
+    await store_embeddings(doc_id, await embed(chunks))
+
+class WorkerSettings:
+    functions = [ingest_document]
+    max_tries = 3                              # retry failed jobs
+    job_timeout = 600
+```
+
+Design jobs to be **idempotent** — safe to run twice — because queues deliver "at least once": a worker can crash after finishing the work but before acknowledging it. Using the document ID as the job ID and upserting results makes a re-run harmless.
+
+## Real-time: SSE vs WebSockets
+
+<Level l="intermediate" />
+
+| | Server-Sent Events | WebSockets |
+|---|---|---|
+| Direction | Server → client only | Both ways, any time |
+| Protocol | Plain HTTP; automatic reconnect | Upgraded connection; you handle reconnects |
+| Best for | Streaming LLM answers, progress updates | Voice agents, live collaboration, interrupting the model mid-answer |
+
+You built SSE in [APIs, async and streaming](/learn/python-backend/apis-async-streaming/). A WebSocket endpoint in FastAPI:
+
+```python title="ws.py"
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+app = FastAPI()
+
+@app.websocket("/ws/chat")
+async def chat(ws: WebSocket):
+    token = ws.query_params.get("token")
+    user = verify_token(token)                 # authenticate before accepting
+    if not user:
+        await ws.close(code=4401); return
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_json()      # {"type": "user_message", "text": "..."} or {"type": "stop"}
+            if msg.get("type") == "user_message":
+                async for token_text in stream_answer(msg["text"][:4000], user):
+                    await ws.send_json({"type": "token", "text": token_text})
+                await ws.send_json({"type": "done"})
+    except WebSocketDisconnect:
+        pass                                    # client left; clean up any running generation
+```
+
+Browsers can't set custom headers on WebSocket connections, so the token goes in the URL or the first message. Use short-lived tokens, and always check the `Origin` header to block other websites from opening connections in your users' names.
+
+## Pagination
+
+<Level l="beginner" />
+
+Never return "all conversations" or "all documents": lists grow without limit. Return pages.
+
+| Style | Request | Pros | Cons |
+|---|---|---|---|
+| Offset | `?limit=20&offset=40` | Simple; jump to any page | Slow on large tables; items shift when new rows arrive |
+| Cursor | `?limit=20&after=2026-11-01T10:00:00Z_8812` | Fast, stable under inserts | Can't jump to page 7 |
+
+```python title="pagination.py"
+@app.get("/conversations")
+def list_conversations(user = Depends(current_user), limit: int = Query(20, le=100), after: str | None = None):
+    sql = "SELECT id, title, created_at FROM conversations WHERE user_id = %s"
+    params = [user["id"]]
+    if after:
+        sql += " AND (created_at, id) < (%s, %s)"
+        ts, last_id = after.rsplit("_", 1); params += [ts, int(last_id)]
+    sql += " ORDER BY created_at DESC, id DESC LIMIT %s"; params.append(limit + 1)
+    rows = db.execute(sql, params).fetchall()
+    next_cursor = f"{rows[limit - 1][2].isoformat()}_{rows[limit - 1][0]}" if len(rows) > limit else None
+    return {"items": rows[:limit], "next_cursor": next_cursor}
+```
+
+Pagination matters for agents too: a tool that returns 5,000 rows floods the context window. Return a page plus a cursor, and let the agent ask for more.
+
+## File uploads and object storage
+
+<Level l="intermediate" />
+
+Users upload PDFs, images and audio. Don't store files in your database or on the web server's disk. Use **object storage** (S3, Azure Blob Storage, Google Cloud Storage).
+
+For large files, have the browser upload **directly** to storage with a **presigned URL**: a link that allows one specific upload, for a few minutes, without exposing your credentials.
+
+```python title="uploads.py"
+import uuid, boto3
+
+s3 = boto3.client("s3")
+ALLOWED = {"application/pdf", "image/png", "image/jpeg"}
+
+@app.post("/uploads")
+def create_upload(content_type: str, size: int, user = Depends(current_user)):
+    if content_type not in ALLOWED or size > 20 * 1024 * 1024:
+        raise HTTPException(400, "PDF, PNG or JPEG under 20 MB only")
+    key = f"uploads/{user['id']}/{uuid.uuid4()}"
+    url = s3.generate_presigned_url("put_object", ExpiresIn=300,
+                                    Params={"Bucket": BUCKET, "Key": key, "ContentType": content_type})
+    return {"upload_url": url, "key": key}       # then enqueue a job to scan and process the file
+```
+
+Keep buckets **private**, scope keys to the user, check the file's real type after upload (magic bytes, not the name), and scan files before processing them.
+
+## Rate limiting
+
+<Level l="intermediate" />
+
+Rate limits protect your service from abuse and — just as important for AI apps — protect your **model bill**. A simple fixed-window limiter in Redis:
+
+```python title="ratelimit.py"
+import time
+from fastapi import HTTPException
+
+def check_rate_limit(user_id: str, limit: int = 20, window_s: int = 60):
+    key = f"rl:{user_id}:{int(time.time()) // window_s}"
+    count = r.incr(key)
+    if count == 1:
+        r.expire(key, window_s)
+    if count > limit:
+        raise HTTPException(429, "Too many requests. Try again in a minute.",
+                            headers={"Retry-After": str(window_s)})
+```
+
+Production systems often use a **token bucket** (allows short bursts) or **sliding window** (smoother), and limit by **tokens or cost per day**, not just requests: one huge prompt can cost more than a hundred small ones.
+
+## Structured logging and monitoring
+
+<Level l="intermediate" />
+
+When something goes wrong at 2 a.m., logs are how you find out what happened. Log **structured JSON** with a **request ID** on every line, so you can follow one request through the API, the queue and the worker.
+
+```python title="logging_setup.py"
+import json, logging, time, uuid
+from fastapi import Request
+
+log = logging.getLogger("app"); logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    start = time.perf_counter()
+    response = await call_next(request)
+    log.info(json.dumps({"rid": rid, "method": request.method, "path": request.url.path,
+                         "status": response.status_code, "ms": round((time.perf_counter() - start) * 1000)}))
+    response.headers["x-request-id"] = rid
+    return response
+```
+
+Track the **golden signals**: request rate, error rate, latency (p50/p95/p99) and saturation (queue length, CPU, connection pool). For AI apps add tokens, cost per request and model errors. Never log secrets, full tokens or unredacted personal data. The [Observability station](/learn/observability/) builds the full stack.
+
+<Interview>
+<QA q="What's the difference between authentication and authorisation, and why does it matter for agents?">
+Authentication proves identity; authorisation decides what that identity may do. An agent's tools must enforce the *end user's* authorisation on every call, so a manipulated model still can't access data the user isn't allowed to see.
+</QA>
+<QA q="When would you choose PostgreSQL over MongoDB for an AI app?">
+Usually by default: relational data (users, conversations, feedback), transactions, flexible JSONB columns and pgvector for embeddings, all in one system. A document store makes sense for very high-volume, schema-less writes where joins and multi-row transactions aren't needed.
+</QA>
+<QA q="A user uploads 300 PDFs to index. How do you design the request?">
+Accept the upload (ideally direct to object storage via presigned URLs), enqueue one idempotent job per document, return 202 with job IDs immediately, process in workers with retries, and report progress through polling, SSE or a webhook.
+</QA>
+<QA q="Why do jobs need to be idempotent?">
+Most queues guarantee at-least-once delivery, so a job can run twice after a crash or timeout. Idempotent jobs (stable IDs, upserts, dedupe keys) make duplicates harmless instead of creating double charges or duplicate documents.
+</QA>
+</Interview>
+
+<Takeaways>
+- Authenticate every request (JWT or OAuth via a managed provider) and authorise every action with the user's own permissions.
+- Default to PostgreSQL; use transactions so related writes succeed or fail together.
+- Redis for caching, sessions and rate limits; queues and idempotent workers for anything slow.
+- SSE for one-way streaming, WebSockets for two-way real-time; paginate every list; upload files to private object storage.
+- Structured logs with request IDs, plus latency, error, token and cost metrics, are how you run it in production.
+</Takeaways>

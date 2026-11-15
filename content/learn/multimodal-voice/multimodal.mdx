@@ -1,0 +1,244 @@
+---
+summary: How models see and hear — Vision Transformers, audio Transformers, CLIP and zero-shot classification, fusion strategies, how vision–language models work and what images cost in tokens, document AI pipelines, tables, multimodal retrieval and RAG, audio and video understanding, and how to evaluate multimodal systems.
+---
+
+## Why multimodal?
+
+<Level l="intermediate" />
+
+The world isn't only text. Users send screenshots, photos of invoices, voice notes and videos. **Multimodal** models process and relate several modalities: "What's wrong with this chart?", "Find product photos matching 'red running shoes'", "Transcribe and summarise this call".
+
+## Vision Transformers (ViT)
+
+<Level l="intermediate" />
+
+A ViT applies the [Transformer](/learn/transformers/attention-and-transformer/) directly to images:
+
+1. Split the image into fixed patches (224×224 → 14×14 = 196 patches of 16×16 pixels).
+2. Flatten each patch and project it to an embedding: a **visual token**.
+3. Add positional embeddings and a learnable `[CLS]` token.
+4. Run a standard Transformer encoder; classify from `[CLS]`.
+
+ViTs need more data than CNNs (they lack CNNs' built-in bias toward local patterns) but scale better and pre-train beautifully. Variants: DeiT (data-efficient), Swin (hierarchical windows), DINOv2 (self-supervised features — excellent general-purpose image embeddings).
+
+```python title="vit.py"
+from transformers import pipeline
+
+vit = pipeline("image-classification", model="google/vit-base-patch16-224")
+print(vit("leaf.jpg")[:3])
+```
+
+## Audio and speech Transformers
+
+<Level l="intermediate" />
+
+The same trick works for audio: turn the **mel spectrogram** (a picture of sound over time) into patches or frames, and those become tokens. The Audio Spectrogram Transformer classifies sounds; wav2vec 2.0 and HuBERT learn speech representations from raw waveforms with self-supervision; Whisper is an encoder–decoder Transformer for speech recognition ([Voice AI](/learn/multimodal-voice/voice/)). Audio can also be turned into discrete tokens with a neural codec (EnCodec), which is how audio LLMs read and speak.
+
+## CLIP: connecting images and text
+
+<Level l="intermediate" />
+
+**CLIP** (Contrastive Language–Image Pre-training) trains an image encoder and a text encoder together on hundreds of millions of (image, caption) pairs. In each batch of N pairs, it maximises the similarity of the N correct pairs and minimises it for the N² − N wrong ones. The result is a **shared embedding space** where an image and its description land close together.
+
+```mermaid caption="Contrastive training pulls matching image–caption pairs together (the diagonal) and pushes mismatched pairs apart."
+flowchart LR
+  I[Images] --> IE[Image encoder<br/>ViT] --> IV[Image vectors]
+  T[Captions] --> TE[Text encoder<br/>Transformer] --> TV[Text vectors]
+  IV --> M{{Similarity matrix<br/>N × N}}
+  TV --> M
+  M --> L[Loss: high on the diagonal<br/>low everywhere else]
+```
+
+<Example title="Worked example: zero-shot classification with CLIP">
+Classify a photo as cat, dog or car — with no training. Embed the image, and embed the texts "a photo of a cat", "a photo of a dog", "a photo of a car". Cosine similarities come out as, say, [0.31, 0.24, 0.12] → softmax (with temperature) → **cat**. Adding a new class costs nothing: just write new text.
+</Example>
+
+```python title="clip_zero_shot.py"
+import torch
+from PIL import Image
+from transformers import CLIPModel, CLIPProcessor
+
+model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+labels = ["a photo of a healthy leaf", "a photo of a diseased leaf", "a photo of a car"]
+inputs = proc(text=labels, images=Image.open("leaf.jpg"), return_tensors="pt", padding=True)
+with torch.no_grad():
+    probs = model(**inputs).logits_per_image.softmax(dim=1)[0]
+for label, p in zip(labels, probs):
+    print(f"{p:.2%}  {label}")
+```
+
+Uses: zero-shot classification, text-to-image search ("show me invoices with a red stamp"), image de-duplication, content moderation, and as the encoder inside diffusion models and vision–language models. Successors include SigLIP, OpenCLIP and multilingual CLIP.
+
+## Fusion strategies
+
+<Level l="advanced" />
+
+How do you combine modalities inside one model?
+
+| Strategy | How | Pros / cons | Examples |
+|---|---|---|---|
+| Early fusion | Combine tokens of all modalities at the input | Rich interactions; expensive, needs aligned data | Native multimodal Transformers (interleaved image + text tokens) |
+| Late fusion | Separate models per modality; combine their predictions | Simple, modular, robust to a missing modality; misses cross-modal interactions | An image classifier + text classifier ensemble |
+| Intermediate fusion | Encode each modality, then fuse embeddings in middle layers | The best balance; most common | A product classifier using title + image embeddings |
+| Cross-attention fusion | Tokens of one modality attend to the other's | Powerful, flexible | Flamingo; decoder cross-attention |
+| Contrastive alignment | Separate encoders trained into one space | Great for retrieval and zero-shot | CLIP, CLAP (audio–text) |
+
+```python title="fusion_classifier.py"
+import torch, torch.nn as nn
+
+class FusionClassifier(nn.Module):
+    """Intermediate fusion: classify products from image + text embeddings."""
+    def __init__(self, img_dim=512, txt_dim=384, n_classes=20):
+        super().__init__()
+        self.img_proj, self.txt_proj = nn.Linear(img_dim, 256), nn.Linear(txt_dim, 256)
+        self.head = nn.Sequential(nn.ReLU(), nn.Dropout(0.2), nn.Linear(512, n_classes))
+
+    def forward(self, img_emb, txt_emb):          # e.g. CLIP image embedding + sentence-encoder embedding
+        return self.head(torch.cat([self.img_proj(img_emb), self.txt_proj(txt_emb)], dim=1))
+```
+
+## Inside a vision–language model
+
+<Level l="advanced" />
+
+Modern VLMs (LLaVA, Qwen-VL, Llama 3.2 Vision, GPT-4o, Claude, Gemini) follow the same recipe:
+
+```mermaid caption="The projector translates image features into the LLM's embedding space, so the LLM reads image tokens alongside text tokens."
+flowchart LR
+  IMG[Image] --> VE[Vision encoder<br/>ViT / SigLIP] --> PF[Patch features<br/>e.g. 576 × 1024]
+  PF --> PR[Projector<br/>MLP] --> IT[Image tokens]
+  TXT[Text] --> TK[Tokeniser] --> TT[Text tokens]
+  IT --> LLM[LLM decoder]
+  TT --> LLM
+  LLM --> ANS[Answer]
+```
+
+**Training (the LLaVA recipe):**
+
+1. **Alignment pre-training:** freeze the vision encoder and the LLM; train only the projector on image–caption pairs, so image features "speak the LLM's language".
+2. **Visual instruction tuning:** unfreeze the LLM (or use LoRA) and train on visual Q&A, reasoning and conversation data.
+
+**Design choices that matter:** image resolution (higher = better OCR and detail, but more tokens), **dynamic tiling** (split large images into crops plus a thumbnail), the number of visual tokens per image (cost!), and how video is handled (sampling frames).
+
+<Example title="Worked example: what an image costs">
+A 336×336 image with 14×14 patches → 24 × 24 = **576 visual tokens**. A high-resolution document page tiled into 4 crops + 1 thumbnail → 5 × 576 = **2,880 tokens** — as much as ~2,000 words of text. Resize images to the smallest resolution that still answers the task.
+</Example>
+
+```python title="open_vlm.py"
+import torch
+from PIL import Image
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+mid = "Qwen/Qwen2-VL-2B-Instruct"
+model = Qwen2VLForConditionalGeneration.from_pretrained(mid, torch_dtype=torch.bfloat16, device_map="auto")
+proc = AutoProcessor.from_pretrained(mid)
+messages = [{"role": "user", "content": [
+    {"type": "image"},
+    {"type": "text", "text": "Extract vendor name, invoice number, date and total as JSON."}]}]
+prompt = proc.apply_chat_template(messages, add_generation_prompt=True)
+inputs = proc(text=[prompt], images=[Image.open("invoice.png")], return_tensors="pt").to(model.device)
+out = model.generate(**inputs, max_new_tokens=200, do_sample=False)
+print(proc.batch_decode(out[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0])
+```
+
+## Document AI
+
+<Level l="advanced" />
+
+Business documents — invoices, contracts, KYC forms, bank statements, purchase orders — mix text, layout, tables, stamps and handwriting.
+
+| Approach | Pipeline | Pros / cons |
+|---|---|---|
+| OCR + rules | Tesseract / PaddleOCR → text → patterns | Cheap; brittle when layouts change |
+| OCR + layout model | Text + bounding boxes → LayoutLMv3 | Accurate on fixed document types; needs labelled data |
+| OCR-free models | Donut, Pix2Struct read pixels directly | No OCR errors; needs fine-tuning |
+| **VLM / LLM extraction** | Page image (and/or OCR text) → VLM with a JSON schema | Flexible, zero/few-shot, handles new layouts; cost, occasional hallucination |
+| Managed services | Azure Document Intelligence, AWS Textract, Google Document AI | Pre-built invoice/ID models, tables, key–value pairs |
+
+### A robust extraction pipeline
+
+```mermaid caption="Validation and routing — not a smarter model — are what make document extraction trustworthy. Human corrections feed back into evaluation and fine-tuning."
+flowchart TD
+  U[Upload] --> C[Classify document type] --> O[OCR / page images]
+  O --> X[Extract fields<br/>VLM + JSON schema]
+  X --> V[Validate business rules<br/>totals add up · GSTIN format · valid dates]
+  V --> R{Confidence routing}
+  R -- high --> A[Auto-post]
+  R -- low or failed rules --> H[Human review queue]
+  H --> L[Corrections logged]
+  L --> E[Evaluation + fine-tuning]
+```
+
+<Tip title="Validation beats a better model">
+Cross-field checks catch most extraction errors cheaply: line items × quantities must sum to the subtotal; subtotal + tax = total; invoice date ≤ due date; the PO number must exist in the ERP. Route failures to people and you get high straight-through rates with near-zero silent errors. [Project 03](/projects/document-extraction/) builds this end to end.
+</Tip>
+
+### Tables
+
+Tables are the hardest part of documents. Options: table-structure models (Table Transformer); PDF-native extraction when the PDF has a text layer (`pdfplumber`, `camelot`); Docling or Unstructured to convert pages to Markdown or HTML tables; or a VLM prompted to output Markdown or JSON tables — then validate row and column totals.
+
+## Multimodal retrieval and RAG
+
+<Level l="advanced" />
+
+Embed images and text in one space (CLIP/SigLIP) to search images with text, text with images, or images with images:
+
+```python title="image_search.py"
+import glob
+import numpy as np
+from PIL import Image
+from sentence_transformers import SentenceTransformer
+
+clip = SentenceTransformer("clip-ViT-B-32")
+paths = sorted(glob.glob("catalog/*.jpg"))
+img_emb = clip.encode([Image.open(p) for p in paths], batch_size=32, normalize_embeddings=True)
+
+def search(query: str, k: int = 5) -> list[str]:
+    q = clip.encode([query], normalize_embeddings=True)
+    return [paths[i] for i in np.argsort(-(img_emb @ q.T).ravel())[:k]]
+
+print(search("red running shoes with white sole"))
+```
+
+**Multimodal RAG** for documents full of charts and diagrams has two main designs:
+
+1. **Caption first:** describe each figure or table with a VLM and index the captions as text.
+2. **Page-image retrieval:** embed whole page images with a visual document retriever (ColPali-style late-interaction models), then pass the retrieved page images to a VLM to answer.
+
+## Audio, video and their evaluation
+
+<Level l="advanced" />
+
+**Audio–language models** take audio either as encoder features (a Whisper-style encoder + projector, like VLMs) or as discrete codec tokens. They can transcribe and understand in one step, answer questions about recordings ("was the customer satisfied?"), and hold speech-to-speech conversations that preserve tone. **CLAP** is the audio–text analogue of CLIP for audio search and zero-shot sound classification.
+
+**Video:** sample frames (one per second, or at scene changes), encode them as image tokens with timestamps, optionally add the speech transcript, and let the VLM reason. For long videos, summarise segments hierarchically or build an index of frame captions + transcript chunks and retrieve the relevant moments (**video RAG**).
+
+| Task | Metrics |
+|---|---|
+| Document field extraction | Field-level precision, recall and F1; exact match per field; straight-through-processing rate |
+| Visual Q&A | Exact match / accuracy; LLM judge for free-form answers |
+| Captioning | CIDEr, BLEU, CLIPScore, human rating |
+| Image–text retrieval | Recall@K |
+| OCR | Character error rate (CER) |
+
+**Enterprise use cases:** invoice and receipt understanding, insurance claim photos, visual product search, manufacturing defect detection with natural-language reports, meeting assistants (audio + slides), and accessibility (image descriptions).
+
+<Interview>
+<QA q="How does CLIP enable zero-shot classification?">
+It embeds images and text into one shared space. Embed the image and a text prompt per class ("a photo of a …"), and pick the class whose text embedding is most similar. New classes need only new text, no training.
+</QA>
+<QA q="How is a vision–language model built?">
+A vision encoder turns the image into patch features; a projector maps them into the LLM's embedding space as image tokens; the LLM reads them alongside text tokens. Training first aligns the projector on captions, then instruction-tunes on visual Q&A.
+</QA>
+<QA q="How would you design a reliable invoice-extraction system?">
+Classify the document, extract with a VLM against a strict schema, validate with business rules (totals, tax IDs, dates, PO lookup), auto-approve only high-confidence results, route the rest to human review, and use corrections for evaluation and fine-tuning.
+</QA>
+</Interview>
+
+<Takeaways>
+- ViTs and audio Transformers turn pixels and sound into tokens; CLIP aligns images and text in one space.
+- VLMs = vision encoder + projector + LLM, and visual token count drives cost.
+- Document AI: classify → extract with a schema → validate with business rules → route low confidence to humans.
+- CLIP-style embeddings power multimodal search; caption-based or page-image retrieval handles charts and scans in RAG.
+</Takeaways>

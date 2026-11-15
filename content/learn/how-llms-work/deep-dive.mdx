@@ -1,0 +1,217 @@
+---
+summary: The engineering of serving LLMs — GPU memory maths, why decoding is memory-bound, prefill vs decode, throughput vs latency, quantisation, vLLM with PagedAttention and continuous batching, speculative decoding, prefix caching, long context, batch inference, GPU-vs-API cost and the levers that cut your bill.
+---
+
+## Memory maths: will it fit?
+
+<Level l="advanced" />
+
+To serve a model you need GPU memory for the **weights** and for the **KV cache** (the stored keys and values of every token in every active conversation; see the [mini-GPT lesson](/learn/transformers/mini-gpt/)).
+
+| Item | Formula | Example: 8B model |
+|---|---|---|
+| Weights, fp16/bf16 | parameters × 2 bytes | 16 GB |
+| Weights, int8 | parameters × 1 byte | 8 GB |
+| Weights, 4-bit | parameters × ~0.5 byte (+ overhead) | ~4.5–5 GB |
+| KV cache | 2 × layers × KV heads × head size × bytes × tokens × batch | Llama 3 8B (32 layers, 8 KV heads, size 128, fp16): **128 KB per token**, so 4 GB for 32k tokens |
+| Activations | Small at inference time | — |
+
+<Example title="Worked example: how many users fit?">
+Serving an 8B model in bf16 (16 GB) on a 24 GB GPU leaves roughly 6–7 GB after framework overhead. That's about 50k tokens of KV cache: for example **12 concurrent users at 4k context**.
+
+Quantising the weights to 4-bit frees about 11 GB more, roughly **4× the concurrent users** on the same card. This is why quantisation and grouped-query attention matter so much for cost.
+</Example>
+
+## Why generation is slow: prefill and decode
+
+<Level l="advanced" />
+
+Every request has two phases:
+
+| Phase | What happens | Bottleneck | Sets |
+|---|---|---|---|
+| **Prefill** | The whole prompt is processed in parallel | Compute | **Time to first token (TTFT)** |
+| **Decode** | One new token at a time, each reading all the weights | Memory bandwidth | **Tokens per second** |
+
+Decoding each token means reading *every weight* from GPU memory but doing little arithmetic per byte, so for a single request: **decode speed ≈ memory bandwidth ÷ model size**.
+
+<Example title="Worked example: tokens per second">
+A GPU with 1 TB/s of memory bandwidth serving a 16 GB (bf16) model: ≈ 1000 / 16 ≈ **60 tokens/s** per sequence at best. A 4-bit version (~5 GB): ≈ **200 tokens/s**.
+</Example>
+
+### Throughput vs latency
+
+**Batching** many users together amortises each weight read across all of them: total **throughput** (tokens per second across all users) rises almost linearly with batch size until compute becomes the limit. But each user's request now shares the GPU, so **latency** per request rises.
+
+| Goal | Tune toward | Example workloads |
+|---|---|---|
+| Low latency | Small batches, fast/small models, speculative decoding, dedicated capacity | Voice agents, autocomplete, interactive chat |
+| High throughput | Large batches, long queues are fine | Nightly document processing, evaluations, embeddings |
+
+Always report both, and report latency as **p50 and p95**, not an average: the slow tail is what users remember.
+
+## Quantisation
+
+<Level l="advanced" />
+
+**Quantisation** stores weights in fewer bits to save memory and speed up decoding, at a small quality cost.
+
+| Method | Type | Notes |
+|---|---|---|
+| bitsandbytes int8 / NF4 | Quantised at load time | Easy in Hugging Face; what QLoRA uses |
+| GPTQ | Post-training, layer by layer, minimises error on calibration data | Fast 4-bit GPU inference |
+| AWQ | Protects the ~1% of "salient" weights found via activations | Strong 4-bit quality |
+| GGUF (llama.cpp) | Many formats (Q4_K_M, Q5_K_M, Q8_0) | CPUs, Apple Silicon, laptops; what Ollama uses |
+| FP8 | 8-bit floats on the newest GPUs | Near-lossless and fast |
+| KV-cache quantisation | int8/fp8 cache | More context per GPU |
+
+**Rules of thumb:** 8-bit is near-lossless; good 4-bit (AWQ, GPTQ, Q4_K_M) loses a little on hard reasoning and coding; below 4 bits quality drops noticeably. **A larger model at 4-bit usually beats a smaller model at 16-bit** in the same memory.
+
+```bash title="Terminal — local models with Ollama"
+ollama pull llama3.1:8b                       # downloads a 4-bit quantised build
+ollama run llama3.1:8b "Explain KV cache in 3 lines"
+curl http://localhost:11434/api/chat -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hi"}]}'
+```
+
+Ollama is the easiest way to run open models on a laptop for development, testing and privacy-sensitive experiments.
+
+## High-throughput serving with vLLM
+
+<Level l="advanced" />
+
+**vLLM** is the most widely used open-source engine for serving open models on your own GPUs. Its two key ideas:
+
+- **PagedAttention** stores the KV cache in fixed-size blocks, like an operating system's virtual memory pages. Without it, each request reserves memory for its maximum length and much of the GPU sits wasted. With it, memory is allocated as needed, so far more requests fit.
+- **Continuous batching** adds new requests to the running batch at *every generation step*, instead of waiting for the whole batch to finish. Short requests don't wait behind long ones, and the GPU stays busy.
+
+```mermaid caption="Static batching waits for the longest request before starting new ones. Continuous batching slots a new request in as soon as any slot frees up."
+flowchart TD
+  subgraph S["Static batching"]
+    direction LR
+    S1[Batch: A B C start] --> S2[A, B finish early<br/>slots sit idle] --> S3[C finishes] --> S4[Next batch starts]
+  end
+  subgraph CB["Continuous batching"]
+    direction LR
+    C1[A B C running] --> C2[A finishes → D joins<br/>B finishes → E joins] --> C3[GPU always full]
+  end
+```
+
+```bash title="Terminal — serve a model"
+pip install vllm
+vllm serve Qwen/Qwen2.5-7B-Instruct --max-model-len 16384 --gpu-memory-utilization 0.9
+```
+
+vLLM exposes an **OpenAI-compatible API**, so the standard client works:
+
+```python title="vllm_client.py"
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
+r = client.chat.completions.create(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    messages=[{"role": "user", "content": "Summarise RAG in one line."}],
+    temperature=0.2, max_tokens=60)
+print(r.choices[0].message.content)
+```
+
+Other serving engines: Hugging Face TGI, NVIDIA TensorRT-LLM, SGLang, and llama.cpp for CPUs and Macs.
+
+## More inference speed-ups
+
+<Level l="advanced" />
+
+| Technique | Idea |
+|---|---|
+| **Speculative decoding** | A small *draft* model proposes k tokens; the big model checks them all in one forward pass. Accepted tokens are free speed (2–3×), and the output distribution is unchanged. |
+| **Prefix / prompt caching** | Reuse the KV cache for a shared prompt start (system prompt, a long document) across requests: big savings on cost and TTFT. API providers offer this as discounted "cached input" tokens. |
+| Prefill–decode disaggregation | Separate GPU pools for the two phases, each tuned for its bottleneck |
+| Tensor parallelism | Split one model across several GPUs for lower latency |
+| Structured-generation engines | Constrain decoding to a JSON schema or grammar: guaranteed valid output |
+| Smaller distilled models | Route easy queries to them |
+
+<Tip title="Make prompt caching work for you">
+Caches match on an *identical prefix*. Put stable content first (system prompt, tool definitions, reference documents) and variable content last (the user's question). Putting today's date or a request ID at the top of the system prompt silently breaks caching on every request.
+</Tip>
+
+## Long context
+
+<Level l="advanced" />
+
+Context windows of 128k to 1M+ tokens enable whole-document reasoning, but:
+
+- **Cost and latency grow with input length.** Prefill attention is O(n²) in compute; the KV cache is O(n) in memory.
+- **"Lost in the middle":** models use information at the start and end of the context better than the middle.
+- **Needle-in-a-haystack** tests check retrieval of one planted fact; real reasoning over many facts spread across a long context is much harder than those tests suggest.
+
+Long context and RAG are complementary: **retrieve the relevant 5–20k tokens** rather than stuffing in 500k. You'll learn to manage this deliberately in [Context engineering](/learn/context-engineering/).
+
+## Batch inference
+
+<Level l="intermediate" />
+
+When nobody is waiting for the answer — classifying last month's tickets, generating embeddings for a corpus, running an evaluation suite — use a provider's **batch API**: submit a file of requests, collect results within hours, typically at around **half the price**. For self-hosted models, offline batch jobs can run at maximum batch size for maximum throughput.
+
+## GPU vs API: when does self-hosting pay?
+
+<Level l="advanced" />
+
+API pricing is per token: you pay only for what you use. A rented GPU costs the same per hour whether it's busy or idle. So the answer depends on **volume** and **utilisation**.
+
+<Example title="Worked example: break-even (illustrative prices)">
+Suppose a GPU costs **₹250 per hour** and, serving a 7–8B model with vLLM, sustains **1,500 output tokens per second** across all users.
+
+- At 100% utilisation: 1,500 × 3,600 = 5.4M tokens/hour → ₹250 / 5,400 ≈ **₹0.046 per 1,000 tokens**.
+- At a realistic **30% utilisation** (traffic is uneven, nights are quiet): ≈ **₹0.15 per 1,000 tokens**.
+- Add engineering time, monitoring, redundancy (at least two GPUs for uptime) and upgrades.
+
+Compare that with the API price for a model of *similar quality on your eval set*. Self-hosting tends to win only with **steady, high volume**, strict data-residency needs, or a fine-tuned small model doing a narrow task. At low or spiky volume, APIs are almost always cheaper and far less work. Prices change constantly: redo this calculation with current numbers before deciding.
+</Example>
+
+## Cost engineering
+
+<Level l="intermediate" />
+
+```
+cost per request = input_tokens × input_price + output_tokens × output_price  (− cached-input discounts)
+```
+
+<Example title="Worked example: savings from routing">
+100,000 requests a day, each 1,500 input + 300 output tokens. A large model at ₹0.25 per 1k input and ₹1.25 per 1k output costs ₹0.75 per request → **₹75,000/day**.
+
+Route 70% of easy requests to a small model at one-tenth the price (₹0.075) and keep 30% on the large model:
+0.7 × 100,000 × 0.075 + 0.3 × 100,000 × 0.75 = 5,250 + 22,500 = **₹27,750/day**, a 63% saving — *if* quality holds on the routed traffic. Verify with your eval set before switching.
+</Example>
+
+The levers, roughly in order of effort:
+
+1. **Shorter prompts:** trim the system prompt, send fewer retrieved chunks.
+2. **Output limits:** set `max_tokens` and ask for concise answers (output tokens are the expensive ones).
+3. **Prompt caching** for fixed prefixes.
+4. **Batch APIs** for offline jobs.
+5. **Model routing / cascades:** a cheap model first, escalate to a strong one on low confidence.
+6. **Semantic caching** of frequent questions.
+7. **Fine-tuned or distilled small models** for narrow, high-volume tasks.
+
+Track **cost per request** and **cost per successful task** per feature on a dashboard. A feature that's cheap per call but needs three retries isn't cheap.
+
+<Interview>
+<QA q="Why is LLM decoding memory-bound rather than compute-bound?">
+Each new token requires reading all model weights from GPU memory, but only a little arithmetic per byte read. So single-stream speed is limited by memory bandwidth divided by model size. Batching amortises the weight reads across many requests.
+</QA>
+<QA q="What are PagedAttention and continuous batching?">
+PagedAttention stores the KV cache in fixed-size blocks allocated on demand, like virtual-memory pages, eliminating wasted reserved memory. Continuous batching admits new requests into the running batch at every decoding step. Together they let vLLM serve many more concurrent requests per GPU.
+</QA>
+<QA q="How does speculative decoding speed things up without changing the output?">
+A small draft model proposes several tokens; the large model verifies them all in a single forward pass and accepts those it agrees with (using a rejection-sampling rule that preserves its own distribution). Several tokens per big-model pass means 2–3× faster decoding.
+</QA>
+<QA q="When is self-hosting an open model cheaper than an API?">
+With steady, high volume that keeps GPUs well utilised, strict data-residency requirements, or a narrow task a small fine-tuned model handles well. At low or spiky volume, per-token APIs are usually cheaper once idle time and engineering are counted.
+</QA>
+</Interview>
+
+<Takeaways>
+- Memory = weights + KV cache; decoding is memory-bandwidth-bound, so quantisation, GQA and batching drive serving cost.
+- Prefill sets time to first token; decode sets tokens per second. Trade throughput against latency per workload.
+- vLLM (PagedAttention + continuous batching), speculative decoding and prefix caching are the main serving wins.
+- Engineer cost with shorter prompts, output limits, caching, batch APIs, routing and small models — and measure cost per successful task.
+</Takeaways>

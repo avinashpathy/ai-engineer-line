@@ -1,0 +1,242 @@
+---
+summary: Decide exactly what the model sees on every call — why more context isn't better, how to order and budget each component, memory strategies for long conversations, structured state, context management for agents (trimming, compaction, sub-agents, just-in-time retrieval), long-term memory and its governance, and token-optimisation techniques.
+---
+
+## What context engineering is
+
+<Level l="intermediate" />
+
+**Context engineering** is deciding, for every model call, exactly what goes into the context window and in what form: instructions, conversation history, retrieved documents, tool results, memories and examples. As applications move from single prompts to long conversations and multi-step agents, getting the context right matters more than wording the instruction perfectly.
+
+<Analogy>
+The context window is the model's desk. A clean desk with the right documents open leads to good work. A desk buried under every paper ever written — or missing the one document that matters — leads to mistakes, however smart the worker.
+</Analogy>
+
+## Why more context isn't always better
+
+<Level l="beginner" />
+
+| Problem | Symptom |
+|---|---|
+| Cost and latency | Every token is billed and processed on every call |
+| Distraction | Irrelevant passages lead to irrelevant or wrong answers |
+| Lost in the middle | Facts in the middle of long contexts are used less reliably |
+| Context rot | In long agent sessions, stale or contradictory information piles up |
+| Conflicts | Old and new versions of a fact are both present; the model picks the wrong one |
+| Window overflow | The request fails, or gets truncated arbitrarily |
+
+## The components of a context, in order
+
+<Level l="intermediate" />
+
+```mermaid caption="Order from most stable to most volatile. Stable layers at the top can be prompt-cached; the current question sits at the end, where models attend best."
+flowchart TD
+  A["System prompt: role, rules, output format · STABLE → cache"] --> B["Tool definitions · STABLE → cache"]
+  B --> C["Long-lived reference: policies, schemas · STABLE → cache"]
+  C --> D["Memory: user profile, long-term facts · per user"]
+  D --> E["Conversation summary of older turns · per session"]
+  E --> F["Recent turns, verbatim · per session"]
+  F --> G["Retrieved documents and tool results · per request"]
+  G --> H["Current user message · per request"]
+```
+
+This ordering maximises prompt-cache hits ([LLM APIs](/learn/llm-apis/core/)) and keeps the question near the end.
+
+## Token budgets
+
+<Level l="intermediate" />
+
+Decide a budget for each component, and **enforce it in code**.
+
+<Example title="Worked example: a budget for a 32k-token model">
+System prompt + tools: 2,500 · user memory: 500 · conversation summary: 800 · last 6 turns: 3,000 · retrieved context: 6,000 · current message: up to 1,000 · reserved for output: 1,500.
+
+Total ≈ **15,300 tokens**: well under the window and roughly half the cost of filling it. When a component exceeds its budget, *compress* it (summarise, re-rank and drop passages) rather than truncating blindly.
+</Example>
+
+```python title="context_builder.py"
+import tiktoken
+
+enc = tiktoken.get_encoding("o200k_base")          # approximate counts are fine for budgeting
+def ntok(s: str) -> int:
+    return len(enc.encode(s))
+
+def fit_passages(passages: list[dict], budget: int) -> list[dict]:
+    """Passages are already sorted by relevance; keep whole passages until the budget is used."""
+    out, used = [], 0
+    for p in passages:
+        t = ntok(p["text"])
+        if used + t > budget:
+            continue
+        out.append(p); used += t
+    return out
+
+def build_context(system, memory, summary, recent_turns, passages, question, budgets):
+    turns, used = [], 0
+    for turn in reversed(recent_turns):            # newest first, until the budget is spent
+        t = ntok(turn["content"])
+        if used + t > budgets["turns"]:
+            break
+        turns.insert(0, turn); used += t
+    docs = fit_passages(passages, budgets["docs"])
+    ctx = "\n\n".join(f"<document id='{i+1}' source='{p['source']}'>\n{p['text']}\n</document>"
+                      for i, p in enumerate(docs))
+    user_block = (f"<memory>\n{memory}\n</memory>\n"
+                  f"<conversation_summary>\n{summary}\n</conversation_summary>\n"
+                  f"{ctx}\n\n<question>\n{question}\n</question>")
+    return system, turns + [{"role": "user", "content": user_block}]
+```
+
+Token budgets are also a **cost control**: cap input and output tokens per request, per user and per feature, and reject or summarise anything over the limit.
+
+## Conversation memory strategies
+
+<Level l="intermediate" />
+
+| Strategy | Mechanism | When to use |
+|---|---|---|
+| Sliding window | Keep the last N turns | Short tasks, chit-chat |
+| Token window | Keep turns until a token budget is reached | A general default |
+| **Rolling summary** | Summarise older turns; keep recent ones verbatim | Long conversations |
+| **Structured state** | Extract key facts into fields (order ID, issue, steps tried) | Task-oriented bots |
+| Retrieval over history | Embed past turns; retrieve the relevant ones | Very long histories |
+| Long-term memory | Persist user facts across sessions | Personal assistants |
+
+Everything in the window right now is the model's **short-term memory**. Anything that must survive beyond it — across sessions, or past compaction — needs **long-term memory** stored outside the model.
+
+### A rolling summary
+
+```python title="conversation.py"
+SUMMARISE = """Update the running summary of a support conversation.
+Keep: the customer's goal, key facts (IDs, amounts, dates), what was tried, decisions, open items.
+Drop: greetings, repetition. Max 150 words.
+<current_summary>{summary}</current_summary>
+<new_turns>{turns}</new_turns>
+Return only the updated summary."""
+
+class Conversation:
+    def __init__(self, llm, keep_recent: int = 6):
+        self.llm, self.keep, self.turns, self.summary = llm, keep_recent, [], ""
+
+    def add(self, role: str, content: str):
+        self.turns.append({"role": role, "content": content})
+        if len(self.turns) > self.keep * 2:                       # compact older turns
+            old, self.turns = self.turns[:-self.keep], self.turns[-self.keep:]
+            text = "\n".join(f"{t['role']}: {t['content']}" for t in old)
+            self.summary = self.llm(SUMMARISE.format(summary=self.summary or "(none)", turns=text))
+```
+
+<Pitfall title="Summaries lose detail">
+Summarisation drops whatever the summariser judged unimportant — sometimes exactly what's needed later. Keep critical facts in **structured state** (IDs, amounts, decisions) that is never summarised away, and test long conversations explicitly.
+</Pitfall>
+
+### Structured state for task-oriented assistants
+
+```python title="state.py"
+from typing import Optional
+from pydantic import BaseModel
+
+class SupportState(BaseModel):
+    customer_id: Optional[str] = None
+    order_id: Optional[str] = None
+    issue_type: Optional[str] = None
+    steps_tried: list[str] = []
+    resolution: Optional[str] = None
+    escalated: bool = False
+
+STATE_UPDATE = """Given the current state JSON and the latest exchange, return the updated state JSON.
+Only change fields supported by the conversation.
+State: {state}
+Latest exchange:
+User: {user}
+Assistant: {assistant}"""
+```
+
+Inject the state into every call as "Known facts: …". It's compact, reliable, and easy to show to human agents on hand-off. [Project 05](/projects/support-chatbot/) uses exactly this.
+
+## Context for agents
+
+<Level l="advanced" />
+
+Agents accumulate tool calls and results fast. A 20-step run can exceed 100k tokens if every raw tool output is kept, and quality drops as the context fills with stale material.
+
+| Technique | Description |
+|---|---|
+| Trim tool outputs | Return only relevant fields, top-N rows, truncated text with "…(2,340 more rows)" |
+| Tool-result clearing | Once a result has been used, replace the raw output with a short note |
+| **Compaction** | When the context hits a threshold, summarise progress into a "state of the task" note and restart the context with it |
+| Scratchpad / notes file | The agent writes key findings to external memory (a file, a database) and reads them back when needed |
+| **Sub-agents** | Delegate a sub-task to a fresh agent with a clean context; get back only its condensed result |
+| Just-in-time retrieval | Keep references (file paths, IDs, URLs) in context; load the content only when needed |
+
+```python title="compaction.py"
+def compact_if_needed(messages: list[dict], llm, limit_tokens: int = 60_000) -> list[dict]:
+    total = sum(ntok(str(m["content"])) for m in messages)
+    if total < limit_tokens:
+        return messages
+    transcript = "\n".join(f"{m['role']}: {str(m['content'])[:2000]}" for m in messages[1:])
+    note = llm(f"""Summarise this agent run so another agent can continue it.
+Include: the original task, findings so far (with key numbers and IDs), actions taken,
+what remains, open risks.
+<run>{transcript}</run>""")
+    return [messages[0], {"role": "user", "content": f"<progress_note>\n{note}\n</progress_note>\nContinue the task."}]
+```
+
+## Long-term memory: what to store and how
+
+<Level l="advanced" />
+
+| Type | Example | Storage |
+|---|---|---|
+| Semantic (facts) | "Prefers answers in Hindi", "works in the Pune office" | Key–value or vector store, per user |
+| Episodic (past events) | "Last week asked about reimbursement for a laptop repair" | Event log + embeddings |
+| Procedural (how-tos) | "For this user's team, approvals go to the finance lead" | Rules or instructions store |
+
+**Memory needs governance:** store only what users would expect, let them view and delete it, avoid sensitive categories unless explicitly needed and consented to, scope everything by user and tenant, and expire stale facts. Retrieve memories by relevance to the current request instead of dumping all of them in.
+
+## Context quality checklist
+
+<Level l="intermediate" />
+
+- Is every component needed for this request?
+- Are retrieved passages re-ranked, de-duplicated and trimmed to budget?
+- Are untrusted contents delimited and labelled as data?
+- Is stable content first (cacheable) and the question last?
+- Are facts that must persist stored in structured state, not only in summaries?
+- Do long conversations and agent runs stay under budget — and is that tested?
+- Are tool outputs concise and token-efficient?
+- Is the context logged, or reconstructable, for debugging?
+
+## Token-optimisation techniques
+
+<Level l="intermediate" />
+
+| Technique | Typical saving |
+|---|---|
+| Shorter, clearer system prompts (remove redundancy) | 20–50% of the prompt |
+| Prompt caching for stable prefixes | ~90% on cached tokens |
+| Fewer, re-ranked RAG chunks (4 instead of 10) | 50%+ of context |
+| Compact formats (CSV or Markdown tables instead of verbose JSON) | 30–60% of data tokens |
+| Output length limits + "be concise" | Large, on the expensive side |
+| Summarised history instead of the full transcript | Grows with conversation length |
+| A smaller model for routing and rewriting steps | Cost per step ÷ 10–20 |
+
+<Example title="Worked example: JSON vs CSV in prompts">
+100 rows like `{"date": "2026-09-01", "city": "Pune", "revenue": 12345}` take roughly **2,000 tokens**, because the field names repeat on every row. The same data as CSV with one header line takes roughly **900 tokens** — a 55% saving with no loss of information.
+</Example>
+
+<Interview>
+<QA q="What is context engineering and why does it matter for agents?">
+Selecting and structuring everything in the model's context for each call. Agents accumulate history and tool outputs, so without trimming, compaction, sub-agents and structured state, quality drops and cost explodes.
+</QA>
+<QA q="How would you handle a chatbot conversation that exceeds the context window?">
+Keep recent turns verbatim, a rolling summary of older turns, critical facts in structured state, and retrieve relevant older turns when needed — all within per-component token budgets.
+</QA>
+</Interview>
+
+<Takeaways>
+- Context is a scarce resource: budget it per component and enforce the budgets in code.
+- Stable content first (cacheable), volatile last; delimit untrusted content.
+- Rolling summaries plus structured state for long conversations; trimming, compaction, sub-agents and just-in-time retrieval for agents.
+- Long-term memory is powerful and sensitive: store little, scope it, let users see and delete it.
+</Takeaways>

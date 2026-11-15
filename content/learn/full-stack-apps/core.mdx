@@ -1,0 +1,457 @@
+---
+summary: Build a full-stack GenAI application end to end — reference architecture, backend layout, conversation data model, JWT auth, an SSE streaming endpoint with guardrails and token accounting, per-user quotas, background jobs, Streamlit and React/Next.js front ends, feedback, testing with a fake LLM, and docker-compose for local development.
+---
+
+## What "full-stack GenAI" means
+
+<Level l="intermediate" />
+
+Job descriptions for AI Engineers increasingly ask for "full-stack GenAI applications": a **backend** that orchestrates models, data and tools, plus a **front end** that streams responses, shows sources and collects feedback. This lesson builds that stack, reusing the pieces from earlier stations:
+
+- the LLM client from [LLM APIs](/learn/llm-apis/core/),
+- context assembly from [Context engineering](/learn/context-engineering/core/),
+- auth, Redis, queues and logging from [Production backend](/learn/python-backend/production-backend/).
+
+```mermaid caption="The app service assembles context, calls models through a client or gateway, and is wrapped by guardrails, tools, retrieval and observability."
+flowchart TD
+  UI[Front end<br/>Streamlit or Next.js] -->|JWT + SSE| API[FastAPI app]
+  API --> AUTH[Auth<br/>current user · tenant]
+  API --> GIN[Input guardrails]
+  GIN --> CTX[Context assembly<br/>history · summary · memory · retrieval]
+  CTX --> LLM[LLM client / gateway<br/>retries · fallbacks · caching]
+  LLM --> GOUT[Output checks]
+  GOUT --> UI
+  CTX <--> RAG[(Vector search)]
+  API <--> DB[(Postgres<br/>conversations · messages · feedback)]
+  API <--> R[(Redis<br/>quotas · cache)]
+  API --> Q[[Queue → workers<br/>long jobs]]
+  API -.-> OBS[(Traces · metrics · cost)]
+```
+
+## Backend project layout
+
+<Level l="intermediate" />
+
+```text title="chat-backend/"
+chat-backend/
+├── app/
+│   ├── main.py          # FastAPI app, routers, middleware
+│   ├── config.py        # pydantic-settings: keys, URLs, model names
+│   ├── auth.py          # JWT verification, current-user dependency
+│   ├── db.py            # SQLAlchemy engine and session
+│   ├── models.py        # ORM tables: conversations, messages, feedback
+│   ├── schemas.py       # Pydantic request/response models
+│   ├── llm.py           # LLM client wrapper
+│   ├── context.py       # context assembly + token budgets
+│   ├── guardrails.py    # input/output checks
+│   └── routers/
+│       ├── chat.py      # /chat/stream, /conversations
+│       └── feedback.py
+├── tests/
+├── Dockerfile
+└── docker-compose.yml   # api + worker + postgres + redis
+```
+
+## The conversation data model
+
+<Level l="intermediate" />
+
+```python title="app/models.py"
+import uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+class Base(DeclarativeBase):
+    pass
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="New chat")
+    summary: Mapped[str] = mapped_column(Text, default="")                 # rolling summary
+    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    messages = relationship("Message", back_populates="conversation", order_by="Message.id")
+
+class Message(Base):
+    __tablename__ = "messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))                          # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(64), default="")
+    prompt_version: Mapped[str] = mapped_column(String(32), default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at = mapped_column(DateTime(timezone=True), server_default=func.now())
+    conversation = relationship("Conversation", back_populates="messages")
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    helpful: Mapped[bool] = mapped_column(Boolean)
+    comment: Mapped[str] = mapped_column(Text, default="")
+```
+
+<Tip>
+Storing the **model, prompt version and token counts on every message** makes debugging, cost attribution and evaluation trivial later: "which prompt version produced the answers people disliked?" becomes one SQL query.
+</Tip>
+
+## Authentication
+
+<Level l="intermediate" />
+
+Verify JWTs issued by your identity provider (Auth0, Cognito, Entra ID, Keycloak, Supabase) using its published keys:
+
+```python title="app/auth.py"
+import jwt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from app.config import settings
+
+bearer = HTTPBearer()
+jwks = jwt.PyJWKClient(settings.jwks_url)
+
+def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> dict:
+    try:
+        key = jwks.get_signing_key_from_jwt(creds.credentials).key
+        claims = jwt.decode(creds.credentials, key, algorithms=["RS256"], audience=settings.jwt_audience)
+        return {"id": claims["sub"], "groups": claims.get("groups", []), "tenant": claims.get("tenant", "default")}
+    except jwt.PyJWTError:
+        raise HTTPException(401, "invalid token")
+```
+
+The authenticated identity drives access control everywhere: which conversations a user can read, which documents retrieval may return, which tools an agent may call on their behalf. In a **multi-tenant** app (many customer companies on one system), every query, cache key, vector search and rate limit is also scoped by `tenant`, so one customer's data can never appear in another's results.
+
+## The streaming chat endpoint
+
+<Level l="intermediate" />
+
+```python title="app/routers/chat.py"
+import asyncio, json
+from anthropic import AsyncAnthropic
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+
+from app.auth import current_user
+from app.config import settings
+from app.context import build_messages
+from app.db import get_db
+from app.guardrails import check_input, check_output
+from app.models import Conversation, Message
+from app.schemas import ChatRequest
+
+router = APIRouter(prefix="/chat")
+llm = AsyncAnthropic()
+PROMPT_VERSION = "assistant/v4"
+
+def sse(event: str, data) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+@router.post("/stream")
+async def chat_stream(req: ChatRequest, user=Depends(current_user), db: Session = Depends(get_db)):
+    conv = db.get(Conversation, req.conversation_id) if req.conversation_id else None
+    if conv and conv.user_id != user["id"]:
+        raise HTTPException(404)                                  # never reveal other users' chats exist
+    if not conv:
+        conv = Conversation(user_id=user["id"], title=req.message[:60]); db.add(conv); db.commit()
+
+    ok, cleaned = check_input(req.message)
+    if not ok:
+        raise HTTPException(400, cleaned)
+    db.add(Message(conversation_id=conv.id, role="user", content=cleaned)); db.commit()
+    system, messages = build_messages(conv, cleaned, user)       # history + retrieval + memory, within budgets
+
+    async def gen():
+        yield sse("meta", {"conversation_id": conv.id})
+        parts = []
+        try:
+            async with llm.messages.stream(model=settings.chat_model, max_tokens=1200,
+                                           system=system, messages=messages) as stream:
+                async for text in stream.text_stream:
+                    parts.append(text)
+                    yield sse("token", {"text": text})
+                final = await stream.get_final_message()
+            answer = check_output("".join(parts))
+            msg = Message(conversation_id=conv.id, role="assistant", content=answer,
+                          model=settings.chat_model, prompt_version=PROMPT_VERSION,
+                          input_tokens=final.usage.input_tokens, output_tokens=final.usage.output_tokens)
+            db.add(msg); db.commit()
+            yield sse("done", {"message_id": msg.id})
+        except asyncio.CancelledError:                            # client disconnected
+            raise
+        except Exception:
+            yield sse("error", {"message": "Something went wrong. Please try again."})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+```
+
+<Pitfall title="Proxies that buffer">
+Nginx and some load balancers buffer responses, so the "stream" arrives all at once at the end. Disable buffering (`X-Accel-Buffering: no`, `proxy_buffering off`) and check idle timeouts for long generations.
+</Pitfall>
+
+Use **SSE** for streaming text (simple, plain HTTP, automatic reconnect) and **WebSockets** when the client must also send in real time — voice, collaborative editing, interrupting generation ([Production backend](/learn/python-backend/production-backend/)).
+
+## Rate limits and token quotas per user
+
+<Level l="intermediate" />
+
+```python title="app/quotas.py"
+import time, redis
+from fastapi import HTTPException
+
+r = redis.Redis.from_url("redis://redis:6379/0")
+
+def check_quota(user_id: str, limit_per_min: int = 20, daily_token_cap: int = 200_000):
+    key = f"rl:{user_id}:{int(time.time() // 60)}"
+    n = r.incr(key); r.expire(key, 120)
+    if n > limit_per_min:
+        raise HTTPException(429, "Too many requests, slow down.")
+    used = int(r.get(f"tok:{user_id}:{time.strftime('%Y%m%d')}") or 0)
+    if used > daily_token_cap:
+        raise HTTPException(429, "Daily usage limit reached.")
+
+def add_tokens(user_id: str, n: int):
+    k = f"tok:{user_id}:{time.strftime('%Y%m%d')}"
+    r.incrby(k, n); r.expire(k, 172800)
+```
+
+Per-user **token caps** protect against abuse and runaway costs — what the OWASP LLM Top 10 calls "unbounded consumption".
+
+## Long-running tasks: background jobs
+
+<Level l="intermediate" />
+
+Report generation, document ingestion and agent research can take minutes. Accept the request, enqueue the job, and let the client poll or subscribe.
+
+```python title="app/reports.py"
+from arq import create_pool
+from arq.connections import RedisSettings
+
+async def generate_report(ctx, job_input: dict) -> dict:
+    await ctx["redis"].set(f"job:{ctx['job_id']}:status", "researching")   # the UI shows progress
+    ...                                                                   # long agent run
+    return {"report_markdown": "..."}
+
+class WorkerSettings:
+    functions = [generate_report]
+    redis_settings = RedisSettings(host="redis")
+
+@router.post("/reports")
+async def start_report(body: dict, user=Depends(current_user)):
+    pool = await create_pool(RedisSettings(host="redis"))
+    job = await pool.enqueue_job("generate_report", {**body, "user": user["id"]})
+    return {"job_id": job.job_id, "status_url": f"/chat/reports/{job.job_id}"}
+```
+
+## Front end option 1: Streamlit
+
+<Level l="beginner" />
+
+The fastest way to put a usable UI on your backend — ideal for demos and internal tools.
+
+```python title="ui.py"
+# streamlit run ui.py
+import json, requests, streamlit as st
+
+st.set_page_config(page_title="Policy Assistant", page_icon="💬")
+st.title("Policy Assistant")
+if "messages" not in st.session_state:
+    st.session_state.messages, st.session_state.conv = [], None
+
+for m in st.session_state.messages:
+    st.chat_message(m["role"]).markdown(m["content"])
+
+if prompt := st.chat_input("Ask about leave, travel, payroll…"):
+    st.chat_message("user").markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    def stream():
+        with requests.post("http://localhost:8000/chat/stream", stream=True,
+                           headers={"Authorization": f"Bearer {st.secrets['token']}"},
+                           json={"message": prompt, "conversation_id": st.session_state.conv}) as r:
+            event = None
+            for line in r.iter_lines(decode_unicode=True):
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data = json.loads(line[5:])
+                    if event == "meta":
+                        st.session_state.conv = data["conversation_id"]
+                    elif event == "token":
+                        yield data["text"]
+
+    answer = st.chat_message("assistant").write_stream(stream())
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+```
+
+## Front end option 2: React / Next.js
+
+<Level l="intermediate" />
+
+A minimal streaming chat client for the SSE endpoint:
+
+```tsx title="components/Chat.tsx"
+"use client";
+import { useState } from "react";
+
+type Msg = { role: "user" | "assistant"; content: string; id?: number };
+
+export default function Chat({ token }: { token: string }) {
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState("");
+  const [convId, setConvId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function send() {
+    if (!input.trim() || busy) return;
+    const question = input; setInput(""); setBusy(true);
+    setMessages(m => [...m, { role: "user", content: question }, { role: "assistant", content: "" }]);
+    const res = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ message: question, conversation_id: convId }),
+    });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const evt of events) {
+        const type = evt.match(/^event: (.*)$/m)?.[1];
+        const data = JSON.parse(evt.match(/^data: (.*)$/m)?.[1] ?? "{}");
+        if (type === "meta") setConvId(data.conversation_id);
+        if (type === "token") setMessages(m => {
+          const copy = [...m];
+          copy[copy.length - 1] = { ...copy[copy.length - 1], content: copy[copy.length - 1].content + data.text };
+          return copy;
+        });
+        if (type === "done") setMessages(m => { const c = [...m]; c[c.length - 1].id = data.message_id; return c; });
+      }
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="mx-auto max-w-2xl p-4">
+      {messages.map((m, i) => (
+        <div key={i} className={m.role === "user" ? "text-right my-2" : "text-left my-2"}>
+          <div className="inline-block rounded-xl px-3 py-2 bg-gray-100 whitespace-pre-wrap">{m.content}</div>
+        </div>
+      ))}
+      <div className="flex gap-2 mt-4">
+        <input className="flex-1 border rounded px-3 py-2" value={input}
+               onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} />
+        <button className="px-4 py-2 rounded bg-black text-white" onClick={send} disabled={busy}>Send</button>
+      </div>
+    </div>
+  );
+}
+```
+
+**The details users notice:** rendered Markdown and code blocks, citations as clickable cards, a **stop generating** button (abort the fetch), retry/regenerate, copy buttons, thumbs up/down on every message, a conversation list, file upload with progress, and clear error states. Libraries such as the Vercel AI SDK provide ready-made hooks for streaming chat.
+
+## Feedback
+
+<Level l="intermediate" />
+
+```python title="app/routers/feedback.py"
+@router.post("/feedback")
+def feedback(message_id: int, helpful: bool, comment: str = "",
+             user=Depends(current_user), db: Session = Depends(get_db)):
+    msg = db.get(Message, message_id)
+    if not msg or msg.conversation.user_id != user["id"]:
+        raise HTTPException(404)
+    db.add(Feedback(message_id=message_id, user_id=user["id"], helpful=helpful, comment=comment[:1000]))
+    db.commit()
+    return {"ok": True}
+```
+
+Feedback rows join to messages, and through them to the model, prompt version and retrieved sources. That join is what turns user complaints into **new evaluation cases** — the user feedback loop.
+
+## Testing an LLM backend
+
+<Level l="intermediate" />
+
+Mock the LLM so tests are fast, free and deterministic:
+
+```python title="tests/test_chat.py"
+from fastapi.testclient import TestClient
+from app.auth import current_user
+from app.main import app
+
+class FakeStream:
+    def __init__(self, chunks): self.chunks = chunks
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): pass
+    @property
+    async def text_stream(self):
+        for c in self.chunks:
+            yield c
+    async def get_final_message(self):
+        class U: input_tokens, output_tokens = 10, 3
+        class M: usage = U()
+        return M()
+
+def test_stream(monkeypatch):
+    app.dependency_overrides[current_user] = lambda: {"id": "u1", "groups": [], "tenant": "t"}
+    monkeypatch.setattr("app.routers.chat.llm.messages.stream", lambda **kw: FakeStream(["Hel", "lo"]))
+    with TestClient(app) as c:
+        body = c.post("/chat/stream", json={"message": "hi"}).text
+    assert "event: token" in body and "Hel" in body and "event: done" in body
+```
+
+Layer your tests: **unit tests** (context building, guardrails, parsers), **API tests** with a fake LLM, and separate **evaluation runs** with real models against a golden set in CI ([Evals](/learn/evaluation/)).
+
+## docker-compose for local development
+
+<Level l="intermediate" />
+
+```yaml title="docker-compose.yml"
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on: [db, redis]
+  worker:
+    build: .
+    command: arq app.worker.WorkerSettings
+    env_file: .env
+    depends_on: [redis]
+  db:
+    image: pgvector/pgvector:pg16          # Postgres + pgvector for chats AND embeddings
+    environment: { POSTGRES_PASSWORD: dev, POSTGRES_DB: app }
+    ports: ["127.0.0.1:5432:5432"]
+  redis:
+    image: redis:7
+  ui:
+    build: ./frontend
+    ports: ["3000:3000"]
+```
+
+One command — `docker compose up --build` — and the whole stack runs on your laptop. The [Deployment & CI/CD station](/learn/deployment-cicd/) takes it to production.
+
+<Interview>
+<QA q="How would you design the backend for a chat assistant?">
+FastAPI with JWT auth; Postgres for conversations, messages (with model, prompt version and tokens) and feedback; context assembly with token budgets; an SSE streaming endpoint wrapped in input/output guardrails; Redis for per-user rate limits and token quotas; a queue and workers for long tasks; and tracing plus cost metrics.
+</QA>
+<QA q="How do you test code that calls an LLM?">
+Unit-test the deterministic parts; replace the model with a fake in API tests so they're fast and repeatable; and run separate evaluation suites with real models against a golden set, gated in CI.
+</QA>
+</Interview>
+
+<Takeaways>
+- A GenAI app is a normal web app plus context assembly, streaming, guardrails and token accounting.
+- Persist conversations with model, prompt version and tokens per message; key everything by the authenticated user (and tenant).
+- Stream with SSE, push long tasks to workers, enforce per-user rate limits and token caps.
+- Test with a fake LLM, evaluate with real models, and capture feedback to grow your eval set.
+</Takeaways>
