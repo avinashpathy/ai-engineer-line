@@ -43,6 +43,10 @@ supabase/migrations  database table + Row Level Security policies
 security-headers.json  one source for all security headers (generates vercel.json and public/_headers)
 ```
 
+## Roadmap coverage
+
+[`docs/ROADMAP-COVERAGE.md`](./docs/ROADMAP-COVERAGE.md) maps every topic in the 160-topic AI Engineer roadmap to the lesson that teaches it, and lists what's still planned or missing. Update it with every content pull request.
+
 ## Writing content
 
 Lessons are Markdown with a few components:

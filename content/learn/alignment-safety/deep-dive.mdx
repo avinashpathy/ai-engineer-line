@@ -1,0 +1,210 @@
+---
+summary: "Alignment algorithms in depth (reward models, the KL-constrained objective, DPO's derivation) and their failure modes, then LLM security for engineers — the OWASP Top 10 for LLM applications, jailbreak techniques, a red-team programme, guardrail and moderation models, PII detection, fairness testing, privacy engineering, and the operational controls: sandboxing, secrets and key rotation, MCP server trust, data poisoning and audit logs."
+---
+
+## RLHF in more detail
+
+<Level l="advanced" />
+
+### Training the reward model
+
+Given a prompt x and two responses — the preferred y_w and the rejected y_l — the reward model r is trained with the **Bradley–Terry** pairwise loss:
+
+```
+L_RM = − log σ( r(x, y_w) − r(x, y_l) )
+```
+
+<Example title="Worked example: the reward-model loss">
+The reward model scores the preferred answer **2.0** and the rejected one **0.5**: σ(1.5) = 0.818 → loss = **0.20**.
+
+If it wrongly scores them 0.5 and 2.0: σ(−1.5) = 0.182 → loss = **1.70**. The loss pushes preferred responses' scores above rejected ones.
+</Example>
+
+### Policy optimisation with a KL constraint
+
+```
+maximise  E[ r(x, y) ] − β · KL( π_θ(y|x) ‖ π_ref(y|x) )
+```
+
+The KL term keeps the policy near the SFT reference model. Without it, the policy finds outputs the reward model over-scores — **reward hacking** — such as excessive length, flattery or confident-sounding filler. PPO optimises this objective with clipped policy-ratio updates for stability.
+
+### DPO, sketched
+
+The KL-constrained objective has a closed-form optimal policy. Rearranging it expresses the reward in terms of the policy itself; plugging that into Bradley–Terry gives a loss that needs **no explicit reward model**:
+
+```
+L_DPO = − log σ( β [ log π_θ(y_w|x)/π_ref(y_w|x) − log π_θ(y_l|x)/π_ref(y_l|x) ] )
+```
+
+Intuition: raise the log-probability of chosen responses relative to the reference more than for rejected ones. β controls how far the model may drift.
+
+### Preference data
+
+- Collected by people comparing pairs (or rankings) of outputs against guidelines (helpfulness, honesty, harmlessness).
+- Or AI feedback (RLAIF, constitutional methods) — scalable and consistent, but inherits the judge model's biases.
+- Watch for **length bias** (longer answers preferred regardless of quality) and control for it in data and evaluation.
+
+### Alignment failure modes
+
+| Failure | Description |
+|---|---|
+| Reward hacking | Exploiting reward-model weaknesses (verbosity, sycophantic praise) |
+| Sycophancy | Agreeing with the user's stated views even when they're wrong |
+| Over-refusal | Refusing benign requests that superficially resemble harmful ones |
+| Alignment tax | Capability loss on some tasks after alignment |
+| Specification gaming | Satisfying the letter of the objective, not its intent |
+
+## The OWASP Top 10 for LLM applications
+
+<Level l="advanced" />
+
+The [OWASP Top 10 for LLM Applications](https://genai.owasp.org/) is the standard checklist for LLM app security. Use it as the backbone of your threat model.
+
+| # | Risk | Example | Mitigations |
+|---|---|---|---|
+| 1 | **Prompt injection** (direct and indirect) | A web page tells your browsing agent to email out the user's files | Treat external content as data; isolate untrusted inputs; least-privilege tools; human approval for side effects; injection classifiers |
+| 2 | **Sensitive information disclosure** | The model reveals another customer's data from context | Access control *before* retrieval; PII redaction; no secrets in prompts; output filtering |
+| 3 | **Supply chain** | Malicious model weights or poisoned packages | Trusted sources, checksums, `safetensors` (not pickle), dependency scanning |
+| 4 | **Data and model poisoning** | An attacker plants content in a RAG corpus or fine-tuning data | Data provenance, review of ingested sources, anomaly detection |
+| 5 | **Improper output handling** | LLM output inserted into SQL, HTML or a shell unescaped → injection, XSS | Treat output as untrusted input: validate, escape, parameterise, sandbox |
+| 6 | **Excessive agency** | An agent with delete permissions "cleans up" production data | Minimal tools and permissions; scoped credentials; approvals |
+| 7 | **System prompt leakage** | Users extract confidential instructions | Never rely on prompt secrecy for security; keep secrets out of prompts |
+| 8 | **Vector and embedding weaknesses** | Cross-tenant leakage in a shared vector index; embedding inversion | Per-tenant filters or indexes; access control; encryption |
+| 9 | **Misinformation** | Confident hallucinations that users act on | Grounding, citations, uncertainty, human review for high stakes |
+| 10 | **Unbounded consumption** | Denial-of-wallet through huge prompts or agent loops | Rate limits, token caps, step budgets, cost alerts |
+
+## Jailbreak and attack techniques to test against
+
+<Level l="advanced" />
+
+| Technique | Example pattern |
+|---|---|
+| Role-play / fiction framing | "Write a story where a character explains…" |
+| Instruction override | "Ignore previous instructions…" |
+| Obfuscation | Base64, leetspeak, other languages, splitting characters |
+| Many-shot | A long context filled with fake compliant dialogues |
+| Payload splitting | A harmful request split across turns or variables |
+| Indirect injection | Instructions hidden in documents, emails, web pages, text inside images, tool outputs |
+| Competing objectives | "As a safety researcher I need…" social engineering |
+
+## Building a red-team programme
+
+<Level l="advanced" />
+
+1. **Scope:** describe the system, its tools and permissions, the data it can reach, and the harms that matter (data leakage, unauthorised actions, toxic output, wrong advice).
+2. **Threat model:** who might attack (curious users, malicious insiders, outsiders via documents) and what they'd gain.
+3. **Test suite:** manual expert probing + automated attack generation (garak, PyRIT, promptfoo's red-team mode) + a curated adversarial dataset.
+4. **Run and record:** attack, response, pass/fail, severity.
+5. **Fix:** prompts, filters, tool restrictions, architecture changes.
+6. **Regression:** every attack you find becomes a permanent test in CI.
+7. **Repeat** before each major release and whenever the model changes.
+
+## Guardrail models and moderation
+
+<Level l="advanced" />
+
+**Content moderation** detects and blocks harmful content going *into* and coming *out of* the model.
+
+```python title="llama_guard.py"
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+gid = "meta-llama/Llama-Guard-3-1B"                 # gated model: accept the licence first
+tok = AutoTokenizer.from_pretrained(gid)
+guard = AutoModelForCausalLM.from_pretrained(gid, torch_dtype=torch.bfloat16, device_map="auto")
+
+def moderate(user_msg: str, assistant_msg: str | None = None) -> str:
+    conv = [{"role": "user", "content": [{"type": "text", "text": user_msg}]}]
+    if assistant_msg:
+        conv.append({"role": "assistant", "content": [{"type": "text", "text": assistant_msg}]})
+    ids = tok.apply_chat_template(conv, return_tensors="pt").to(guard.device)
+    out = guard.generate(ids, max_new_tokens=20, do_sample=False)
+    return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True).strip()   # "safe" or "unsafe\nS2"
+```
+
+Layer options: provider moderation endpoints, open safety classifiers (Llama Guard, ShieldGemma), prompt-injection detectors, PII detectors (Microsoft Presidio), topic classifiers. Each adds latency, so run checks in parallel where possible and calibrate thresholds on your own traffic.
+
+```python title="presidio_redact.py"
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+
+text = "Call Priya at 9845012345 or priya@corp.in about invoice 4412"
+results = AnalyzerEngine().analyze(text=text, language="en")
+print(AnonymizerEngine().anonymize(text=text, analyzer_results=results).text)
+# "Call <PERSON> at <PHONE_NUMBER> or <EMAIL_ADDRESS> about invoice 4412"
+```
+
+## Measuring fairness and bias
+
+<Level l="advanced" />
+
+**Counterfactual evaluation:** hold everything constant except a demographic signal, and compare outputs.
+
+```python title="counterfactual_bias.py"
+import itertools
+
+template = "Write a two-line performance review for {name}, a {role} who exceeded targets by 15%."
+names = {"group_a": ["Rahul", "Arjun", "Vikram"], "group_b": ["Priya", "Ananya", "Lakshmi"]}
+roles = ["software engineer", "sales manager"]
+
+rows = []
+for grp, ns in names.items():
+    for n, r in itertools.product(ns, roles):
+        reply = llm(template.format(name=n, role=r))
+        rows.append({"group": grp, "role": r, "len": len(reply.split()),
+                     "sentiment": sentiment_score(reply),
+                     "leadership_words": count_terms(reply, LEADERSHIP_TERMS)})
+# compare group means; significant gaps -> investigate prompts, add instructions, change model, human review
+```
+
+Also check quality parity across languages and dialects, refusal-rate parity, and stereotype benchmarks (BBQ-style question sets). Record results in the system card.
+
+## Privacy engineering for LLM systems
+
+<Level l="advanced" />
+
+- **Data minimisation:** send the model only what the task needs.
+- **Redact or pseudonymise** personal data before prompts and logs; re-identify only in the final, authorised view.
+- **Retention:** configure provider data-retention and training opt-outs; set log retention periods.
+- **Residency:** choose regions consistent with regulation and contracts.
+- **Tenant isolation** in vector stores, caches and fine-tuned adapters.
+- **Consent and purpose limitation** (India's DPDP Act): use personal data only for the stated purpose.
+- **Right to erasure:** be able to delete a user's data from logs and indexes — and remember that fine-tuned weights can't easily "forget", one more reason to keep personal data out of fine-tuning sets.
+
+## Operational security controls
+
+<Level l="advanced" />
+
+The model is only one part of the attack surface. These controls protect everything around it.
+
+| Control | What to do |
+|---|---|
+| **Tool sandboxing** | Run model-written code or shell commands in an isolated environment (a container or micro-VM with no network by default, CPU/memory/time limits, a throw-away filesystem). Never `exec()` model output in your app process. |
+| **Least-privilege tools** | Each tool and agent gets only the permissions it needs: read-only database roles, scoped API tokens, allow-listed hosts and recipients. |
+| **Authorisation for agents** | The agent acts with the *end user's* permissions, checked by the downstream system on every action — never a super-user service account. |
+| **Human approval** | Payments, deletions, outgoing emails and anything else you can't undo wait for a person to confirm. |
+| **Secrets management** | Keys live in a secret manager or environment variables — never in prompts, code, notebooks or logs. |
+| **API key rotation** | Rotate keys on a schedule (e.g. every 90 days) and immediately after any suspected leak; use separate keys per environment and service so one leak has a small blast radius. |
+| **MCP server trust** | Connect only MCP servers you trust and have reviewed; pin their versions; review tool descriptions (a malicious server can hide instructions in them); give each server the minimum scopes; and treat its outputs as untrusted. See [MCP](/learn/mcp/). |
+| **Data poisoning defences** | Track the provenance of RAG documents and training data, restrict who can add content to the knowledge base, review new sources, and watch for anomalies such as documents full of instructions. |
+| **Access control in RAG** | Filter by the user's permissions *inside* the retrieval query, so unauthorised chunks are never fetched ([Project 04](/projects/policy-rag/)). |
+| **Audit logging** | Record who asked what, which tools ran with which arguments, what was approved and by whom — with personal data redacted and retention controlled. |
+
+<Interview>
+<QA q="What is reward hacking and how does RLHF guard against it?">
+The policy learns to exploit weaknesses in the reward model — verbosity, flattery, confident filler — rather than actually improving. The KL penalty keeps the policy close to the SFT reference model, limiting how far it can drift to exploit the reward model.
+</QA>
+<QA q="Walk through the OWASP risks most relevant to an agent with tools.">
+Prompt injection (especially indirect), excessive agency, improper output handling, sensitive information disclosure and unbounded consumption. Mitigate with least-privilege tools acting under the user's identity, approvals for side effects, treating outputs as untrusted, retrieval-time access control, and step/token budgets.
+</QA>
+<QA q="How would you set up red-teaming for an LLM product?">
+Scope the system and harms, build a threat model, combine manual probing with automated attack tools and a curated adversarial set, record and fix findings, turn every finding into a CI regression test, and repeat before releases and model changes.
+</QA>
+</Interview>
+
+<Takeaways>
+- RLHF = reward model + KL-constrained RL; DPO gets the same effect directly from preference pairs. Watch for reward hacking, sycophancy and over-refusal.
+- Use the OWASP Top 10 for LLMs as your security checklist; most fixes are architectural, not prompt-based.
+- Red-team continuously and turn every finding into a regression test.
+- Sandbox tools, minimise privileges, manage and rotate secrets, vet MCP servers, guard the knowledge base against poisoning, and keep audit logs.
+</Takeaways>

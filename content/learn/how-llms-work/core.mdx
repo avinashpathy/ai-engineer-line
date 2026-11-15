@@ -1,0 +1,207 @@
+---
+summary: What an LLM really is, the refinements inside a modern LLM, how pre-training at scale works (with the compute maths), how a base model becomes an assistant and a reasoning model, how text is decoded, open vs closed models, and the limitations you have to design around.
+---
+
+## What is a large language model?
+
+<Level l="beginner" />
+
+An LLM is a (usually decoder-only) [Transformer](/learn/transformers/attention-and-transformer/) with billions of parameters, trained on trillions of tokens to do one thing: **predict the next token**. That simple objective, at enormous scale, forces the model to learn grammar, facts, reasoning patterns, coding and translation, because all of them help predict text.
+
+<Example title="Worked example: next-token prediction">
+Input: "The capital of Karnataka is". The model outputs a probability for every token in its vocabulary (100,000+ of them): "Bengaluru" 0.86, "Bangalore" 0.09, "Mysuru" 0.01, … It picks one (see *decoding* below), appends it to the input, and repeats until it produces an end-of-sequence token or hits the length limit.
+</Example>
+
+Everything an LLM "says" is produced this way, one token at a time. Keep that in mind: it explains streaming, why output tokens cost more than input tokens, and why models sometimes talk themselves into a wrong answer.
+
+## Inside a modern LLM
+
+<Level l="intermediate" />
+
+Modern LLMs use the same stacked decoder blocks you built in the [mini-GPT lesson](/learn/transformers/mini-gpt/), with refinements:
+
+| Component | Modern choice | Why |
+|---|---|---|
+| Normalisation | RMSNorm, applied before each sub-layer (pre-norm) | Cheaper and more stable than post-norm LayerNorm |
+| Positions | RoPE (rotary position embeddings) | Encodes relative positions; can be stretched to long contexts |
+| Activation | SwiGLU | Better quality than GELU for the same compute |
+| Attention | Grouped-query attention (GQA) + FlashAttention | Smaller KV cache, faster inference |
+| Sparsity | Mixture of Experts (MoE) | Many "expert" feed-forward networks; a router activates only 2–8 per token: huge capacity, modest compute |
+| Context length | 8k → 128k → 1M+ tokens | Whole documents and codebases in one prompt |
+
+For scale: Llama 3 8B has 32 layers, a hidden size of 4,096 and 32 attention heads, and was trained on about 15 trillion tokens.
+
+## Pre-training at scale
+
+<Level l="intermediate" />
+
+1. **Data.** Web crawls (Common Crawl), books, code, papers, Wikipedia and multilingual text, heavily filtered with quality classifiers, de-duplication and toxicity/PII removal. Data quality now matters as much as model size.
+2. **Tokenise** with byte-level BPE ([Tokenisation](/learn/transformers/tokenisation-and-families/)).
+3. **Train** with next-token cross-entropy loss, AdamW, a warm-up then cosine learning-rate schedule and bf16 mixed precision, across thousands of GPUs for weeks or months.
+4. **Parallelise.** *Data parallel* (copies of the model on different batches), *tensor parallel* (split each matrix across GPUs), *pipeline parallel* (split layers across GPUs), plus ZeRO/FSDP to shard optimiser state.
+
+### Scaling laws
+
+Loss falls predictably, as a power law, as you increase parameters (N), data (D) and compute (C ≈ 6·N·D floating-point operations). The **Chinchilla** result showed that, for a fixed compute budget, earlier models were under-trained: the compute-optimal ratio is roughly **20 tokens per parameter**. Today many models are trained far beyond that ("over-trained") because smaller models are cheaper to *serve*.
+
+<Example title="Worked example: training compute">
+An 8B-parameter model on 15T tokens: C ≈ 6 × 8×10⁹ × 15×10¹² = **7.2×10²³ FLOPs**.
+
+A GPU sustaining 4×10¹⁴ FLOP/s needs 1.8×10⁹ seconds: about **57 GPU-years**. Spread over ~16,000 GPUs that's roughly 1.3 days of pure compute; in practice much longer, because no cluster runs at full efficiency.
+</Example>
+
+## From base model to assistant
+
+<Level l="intermediate" />
+
+```mermaid caption="Each stage starts from the previous model. The base model knows a lot but just continues text; later stages teach it to follow instructions, to behave well, and to reason."
+flowchart TD
+  A[Pre-training<br/>trillions of raw tokens] --> B[Base model<br/>completes text]
+  B --> C[Supervised fine-tuning<br/>10k–1M instruction → ideal answer pairs]
+  C --> D[Instruct / chat model<br/>follows instructions]
+  D --> E[Preference alignment<br/>RLHF · DPO · RLAIF]
+  E --> F[Helpful, honest, harmless assistant]
+  F --> G[Reasoning training<br/>RL on maths & code with checkable answers]
+  G --> H[Reasoning model<br/>thinks before answering]
+```
+
+| Stage | Data | Result |
+|---|---|---|
+| Pre-training | Trillions of raw tokens | **Base model**: completes text but doesn't follow instructions |
+| Supervised fine-tuning (SFT) | 10k–1M curated instruction → response pairs | Follows instructions and the chat format |
+| Preference alignment | Human or AI comparisons of two responses | Helpful, honest, harmless style ([Alignment](/learn/alignment-safety/)) |
+| Reasoning training | Maths and code problems with checkable answers, using RL | Models that "think" step by step before answering |
+
+<Tip title="Base vs instruct">
+Ask a *base* model "What is the capital of France?" and it may continue with "What is the capital of Germany? What is…" because that's what a list of quiz questions looks like. Instruct models answer. When you download open models, pick the `-Instruct` or `-Chat` variant unless you're fine-tuning from scratch.
+</Tip>
+
+## Reasoning models
+
+<Level l="intermediate" />
+
+**Reasoning models** are trained, largely with reinforcement learning on problems whose answers can be checked automatically, to produce an extended internal "chain of thought" before the final answer. Spending more tokens thinking — **test-time compute** — improves accuracy on maths, coding, planning and multi-step analysis.
+
+| | Standard model | Reasoning model / thinking mode |
+|---|---|---|
+| Best for | Extraction, classification, chat, simple Q&A | Hard maths, debugging, planning, complex analysis, agent decisions |
+| Latency | Low | Higher: seconds to minutes of "thinking" |
+| Cost | Lower | Higher: thinking tokens are billed as output |
+| Control | Prompt | Prompt plus a *reasoning effort* or *thinking budget* setting |
+
+Many APIs expose an effort or thinking-budget parameter. Tune it per task, and measure: for simple tasks, extra thinking just adds cost and latency.
+
+## How text is generated: decoding
+
+<Level l="intermediate" />
+
+At each step the model produces a probability distribution over the vocabulary. The **decoding strategy** turns it into a choice.
+
+| Strategy | How | Effect |
+|---|---|---|
+| Greedy | Always pick the most probable token | Deterministic; can be repetitive |
+| Beam search | Keep the top-k partial sequences | Good for translation; bland for chat |
+| **Temperature** | Divide the scores (logits) by T before softmax | T below 1: sharper and safer; above 1: more random and creative |
+| Top-k | Sample only from the k most likely tokens | Cuts off nonsense |
+| **Top-p** (nucleus) | Sample from the smallest set whose probabilities add up to p | Adapts to how confident the model is; p = 0.9 is a common default |
+
+<Example title="Worked example: temperature">
+Logits [2.0, 1.0, 0.0] for three candidate tokens.
+
+- **T = 1:** softmax → [0.67, 0.24, 0.09].
+- **T = 0.5** (logits become [4, 2, 0]): → [0.87, 0.12, 0.02]. Far more confident.
+- **T = 2** (logits become [1, 0.5, 0]): → [0.51, 0.31, 0.19]. Flatter, more varied.
+</Example>
+
+**Rule of thumb:** temperature 0–0.3 for extraction, classification, code and factual Q&A; 0.7–1.0 for brainstorming and creative writing. Change temperature *or* top-p, not both at once, so you know which one helped.
+
+## Running a model: local vs API
+
+<Level l="intermediate" />
+
+The same request, two ways.
+
+```python title="local_model.py"
+# An open model on your own GPU with Hugging Face
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+mid = "Qwen/Qwen2.5-1.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(mid)
+model = AutoModelForCausalLM.from_pretrained(mid, torch_dtype=torch.bfloat16, device_map="auto")
+
+msgs = [{"role": "system", "content": "You are a concise assistant."},
+        {"role": "user", "content": "Explain overfitting in two sentences."}]
+ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
+out = model.generate(ids, max_new_tokens=120, temperature=0.3, top_p=0.9, do_sample=True)
+print(tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True))
+```
+
+```python title="api_model.py"
+# A hosted model through an API (the pattern is similar across providers)
+from anthropic import Anthropic
+
+client = Anthropic()                       # reads ANTHROPIC_API_KEY from the environment
+resp = client.messages.create(
+    model="claude-sonnet-4-5",             # check the provider's docs for current model names
+    max_tokens=300,
+    system="You are a concise assistant.",
+    messages=[{"role": "user", "content": "Explain overfitting in two sentences."}])
+print(resp.content[0].text)
+```
+
+Notice `apply_chat_template`: chat models expect special tokens marking system, user and assistant turns. The API does this for you; locally you must use the model's own template.
+
+## Open vs closed models
+
+<Level l="intermediate" />
+
+| | Closed / API (Claude, GPT, Gemini) | Open-weight (Llama, Mistral, Qwen, Gemma, DeepSeek) |
+|---|---|---|
+| Quality | The frontier | Close behind, improving fast |
+| Setup | Instant | Need GPUs and a serving stack |
+| Data control | Data leaves your network (check the provider's terms and regions) | Can run fully on-premises |
+| Customisation | Prompting; some fine-tuning APIs | Full fine-tuning, LoRA, quantisation, any modification |
+| Cost model | Per token | Infrastructure (GPUs), whether busy or idle |
+| Licence | Terms of service | Varies: some are permissive (Apache 2.0, MIT), others restrict commercial use or user counts |
+
+Many production systems use both: an API model for hard requests and an open model for private, high-volume or offline work. The [deep dive](/learn/how-llms-work/deep-dive/) shows how to work out when self-hosting is cheaper.
+
+## Limitations to design around
+
+<Level l="beginner" />
+
+| Limitation | What happens | Design response |
+|---|---|---|
+| **Hallucination** | Confident, fluent, false statements | Ground answers with [RAG](/learn/rag-foundations/), require citations, allow "I don't know", verify with code |
+| Knowledge cut-off | No awareness of recent events | Retrieval or web-search tools |
+| Context limits, "lost in the middle" | Facts buried in the middle of long prompts get used less | Retrieve less but better; put key instructions at the start and the question at the end |
+| Sensitivity to wording and example order | Small prompt changes shift results | Version prompts and test them against an eval set |
+| Arithmetic and exact counting | Plausible but wrong numbers | Give the model a calculator or code-execution tool |
+| Cost and latency | Both scale with tokens | Shorter prompts, caching, routing, streaming |
+
+### Why do LLMs hallucinate?
+
+The model is trained to produce *plausible continuations*, not *verified facts*. When its knowledge is thin or the question is ambiguous it still produces fluent text, because fluent text is what it was optimised for. Instruction tuning and alignment reduce this but can't eliminate it, so the fix is architectural: give the model the facts (retrieval), make it show its sources (citations), give it permission to say it doesn't know, and check outputs with code where you can.
+
+<Interview>
+<QA q="Why does an LLM hallucinate?">
+It's trained to produce plausible continuations, not verified facts; when its knowledge is weak it still generates fluent text. Grounding through retrieval, citations, allowing "I don't know" and verifying outputs reduce it.
+</QA>
+<QA q="What does temperature do mathematically?">
+It divides the logits by T before the softmax. Lower T sharpens the distribution toward the top token; higher T flattens it, making unlikely tokens more probable.
+</QA>
+<QA q="What's the difference between a base model and an instruct model?">
+A base model is only pre-trained to continue text. An instruct model has additionally been fine-tuned on instruction–response pairs (and usually preference-aligned), so it follows instructions and the chat format.
+</QA>
+<QA q="When would you use a reasoning model?">
+For hard multi-step problems — maths, debugging, planning, complex analysis, tricky agent decisions — where accuracy is worth extra latency and output tokens. Not for simple extraction or classification.
+</QA>
+</Interview>
+
+<Takeaways>
+- An LLM is a huge decoder-only Transformer trained to predict the next token; abilities emerge from scale and data.
+- Base → instruction tuning → preference alignment → (optionally) reasoning training turns a text-completer into an assistant.
+- Decoding settings (temperature, top-p) control randomness: low for facts and code, higher for creativity.
+- Choose open or closed models on quality, data control, customisation and cost; design around hallucination, context limits and arithmetic.
+</Takeaways>

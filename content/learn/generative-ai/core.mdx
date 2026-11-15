@@ -1,0 +1,150 @@
+---
+summary: What makes a model "generative", the five families of generative models (autoregressive, VAE, GAN, diffusion, flow), how each one works in plain language, how generated output is evaluated, and where generative AI earns its keep in companies.
+---
+
+## Discriminative vs generative
+
+<Level l="beginner" />
+
+Most of the models in the [ML Essentials](/learn/ml-essentials/how-models-learn/) station were **discriminative**: they learn the *boundary* between classes. "Is this email spam?"
+
+A **generative** model learns the *distribution of the data itself*, so it can produce new examples that look like the training data. "Write a new email that looks like spam." Or a photo, a song, a paragraph, a piece of code.
+
+<Analogy>
+A discriminative art critic can tell a Monet from a Van Gogh. A generative artist has learned the style so deeply they can paint a brand-new "Monet". Generating is harder: you have to understand the whole picture, not just the differences.
+</Analogy>
+
+## The generative model zoo
+
+<Level l="beginner" />
+
+| Family | Core idea | Strengths | Used for |
+|---|---|---|---|
+| **Autoregressive** | Generate one piece at a time, each conditioned on everything before it | Exact likelihood, scales superbly | LLMs (GPT, Claude, Llama), code, some audio models |
+| **VAE** (variational autoencoder) | Compress to a smooth "latent space", then decode samples from it | Stable training, meaningful latent space | Compression stage inside image generators, anomaly detection |
+| **GAN** (generative adversarial network) | A generator tries to fool a discriminator in a two-player game | Very sharp images, fast sampling | Faces (StyleGAN), super-resolution, speech vocoders |
+| **Diffusion** | Learn to reverse a gradual noising process | Top image and video quality, stable training | Stable Diffusion, DALL·E 3, Imagen, video models |
+| **Flow / flow matching** | Learn an invertible path or "velocity field" from noise to data | Fast, high-quality sampling | Newer image and speech generators |
+
+Everything on the LLM line is autoregressive. The rest matter because modern products are **multimodal**: the same app might write text, generate an image and speak an answer.
+
+## Autoencoders and VAEs
+
+<Level l="intermediate" />
+
+An **autoencoder** squeezes its input through a small bottleneck — the **latent code** — and then tries to reconstruct the original. Trained to minimise reconstruction error, it learns a compact representation of the data. The catch: its latent space has gaps, so decoding a random point usually gives garbage.
+
+A **variational autoencoder** fixes that. Its encoder outputs a *distribution* (a mean and a variance) rather than a single point, and training adds a penalty that pulls those distributions toward a standard normal. The latent space becomes smooth and continuous:
+
+- Sample a random point, decode it, and you get a plausible new example.
+- Interpolate between the latent codes of two faces and the decoded images morph smoothly from one to the other.
+
+```
+Loss = reconstruction error + β · KL( q(z|x) ‖ N(0, I) )
+```
+
+The **reparameterisation trick** (z = μ + σ · ε, where ε is random noise) moves the randomness outside the network so gradients can flow through the sampling step.
+
+## GANs
+
+<Level l="intermediate" />
+
+Two networks compete:
+
+- The **generator** turns random noise into fake samples.
+- The **discriminator** tries to tell real samples from fakes.
+
+```mermaid caption="A GAN training step. The discriminator learns to catch fakes; the generator learns from the discriminator's verdicts how to make better fakes."
+flowchart TD
+  N[Random noise z] --> G[Generator]
+  G --> F[Fake image]
+  R[Real image] --> D{Discriminator<br/>real or fake?}
+  F --> D
+  D -- "loss: did it spot the fake?" --> D
+  D -- "gradient: how to fool it" --> G
+```
+
+<Analogy>
+A counterfeiter and a detective. Each time the detective spots a flaw, the counterfeiter improves. Eventually the fake notes are indistinguishable from real ones.
+</Analogy>
+
+GANs produce very sharp images, but they're notoriously hard to train: **mode collapse** (the generator learns to produce only a few kinds of output), oscillation, and sensitivity to settings.
+
+## Diffusion models
+
+<Level l="intermediate" />
+
+Diffusion is the technique behind today's best image and video generators.
+
+- **Forward process:** take a real image and add a little Gaussian noise, step by step (say 1,000 steps), until it's pure static.
+- **Reverse process:** train a network to predict the noise that was added at each step. To generate, start from pure noise and remove it a step at a time.
+
+```mermaid caption="Training learns the right-to-left direction. Generation starts from random noise and denoises step by step, steered by the text prompt."
+flowchart LR
+  A[Real image] -->|add noise| B[Slightly noisy] -->|add noise| C[Very noisy] -->|add noise| D[Pure noise]
+  D -.->|model removes noise<br/>guided by prompt| C2[Less noisy] -.-> B2[Almost clean] -.-> A2[New image]
+```
+
+<Analogy>
+A sculptor sees a statue inside a block of marble and chips away everything that isn't the statue. A diffusion model starts with a block of noise and chips away the noise, guided by your prompt, until an image remains.
+</Analogy>
+
+**Stable Diffusion** makes this practical by running diffusion in the compressed latent space of a VAE (a **latent diffusion model**, about 50× cheaper than working on raw pixels). It steers generation with text through a text encoder and **classifier-free guidance**, whose *guidance scale* trades how closely the image follows the prompt against how varied the results are.
+
+```python title="text_to_image.py"
+import torch
+from diffusers import AutoPipelineForText2Image
+
+pipe = AutoPipelineForText2Image.from_pretrained(
+    "stabilityai/sdxl-turbo", torch_dtype=torch.float16).to("cuda")
+img = pipe("isometric illustration of a data centre in Bengaluru, soft lighting",
+           num_inference_steps=2, guidance_scale=0.0).images[0]   # Turbo models need very few steps
+img.save("datacentre.png")
+```
+
+## How generated output is evaluated
+
+<Level l="intermediate" />
+
+| Modality | Common metrics |
+|---|---|
+| Images | **FID** (distance between real and generated feature distributions; lower is better), **CLIP score** (how well the image matches the text), human preference |
+| Text | Perplexity, task benchmarks (MMLU, GSM8K, HumanEval), LLM-as-judge, human evaluation |
+| Speech | MOS (mean opinion score from listeners), word error rate when the generated speech is transcribed |
+
+Benchmarks tell you about a model in general. For a product, you'll always end up building your own evaluation set; the [Evals station](/learn/evaluation/) shows how.
+
+## Generative AI in the enterprise
+
+<Level l="beginner" />
+
+Where companies actually get value today:
+
+| Use case | What it does | On this site |
+|---|---|---|
+| Customer-support assistants | Answer questions, look up orders, hand off to humans | [Project 05](/projects/support-chatbot/) |
+| Document extraction and summarisation | Invoices, contracts, claims, résumés | [Projects 02](/projects/resume-jd-matcher/) and [03](/projects/document-extraction/) |
+| Knowledge search | Answer from internal documents with citations | The [RAG line](/learn/rag-foundations/) |
+| Code generation and review | Write, explain and review code | [Project 06](/projects/code-review-assistant/) |
+| Data-analysis copilots | Natural-language questions over databases | [Project 07](/projects/sales-data-analyst/) |
+| Workflow agents | Multi-step tasks across tools and APIs | The [Agents line](/learn/agent-foundations/) |
+| Marketing and creative content | Drafts, variations, images | This lesson's diffusion models |
+
+<Interview>
+<QA q="What's the difference between a discriminative and a generative model?">
+A discriminative model learns the decision boundary between classes, p(y|x). A generative model learns the data distribution itself, p(x) or p(x|condition), so it can sample new data.
+</QA>
+<QA q="Why did diffusion models overtake GANs for image generation?">
+Diffusion trains stably with a simple loss, covers the full variety of the data instead of collapsing to a few modes, and reaches higher quality. Its old weakness, slow sampling, has largely been fixed by latent diffusion, better samplers and distillation.
+</QA>
+<QA q="What does the guidance scale do in Stable Diffusion?">
+It controls classifier-free guidance: how strongly sampling is pushed toward the prompt. Higher values follow the prompt more literally but reduce diversity and can over-saturate; lower values are more varied but may drift from the prompt.
+</QA>
+</Interview>
+
+<Takeaways>
+- Generative models learn the data distribution so they can create new samples.
+- LLMs are autoregressive; VAEs give smooth latent spaces; GANs are sharp but unstable; diffusion leads in images and video.
+- Latent diffusion plus text guidance is how modern image generators work.
+- Evaluate with modality-specific metrics, then with your own task-specific evaluation set.
+</Takeaways>
