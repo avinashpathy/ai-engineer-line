@@ -1,0 +1,322 @@
+---
+summary: "A structured LangGraph reference: the mental model (state, reducers, nodes, edges, checkpointers, stores, interrupts, Send, subgraphs, Command), routing, a tool-using agent, persistence with threads and time travel, long-term memory with a store, streaming to an API, human-in-the-loop patterns, map-reduce with Send, subgraphs, handoffs with Command, reliability features, testing with fake models, and deployment."
+---
+
+## Why LangGraph?
+
+<Level l="intermediate" />
+
+LangGraph has become a default choice for production agents because it gives **explicit control** over state, branching, loops, persistence and human-in-the-loop. Earlier lessons used it in passing ([foundations](/learn/agent-foundations/core/), [patterns](/learn/agent-patterns/core/), [corrective RAG](/learn/production-rag/core/)). This lesson is a structured reference you can build from.
+
+## The mental model
+
+<Level l="intermediate" />
+
+| Concept | Meaning |
+|---|---|
+| **State** | A typed dictionary shared by all nodes — the single source of truth for a run |
+| **Reducer** | How updates to a state key are merged (overwrite by default; append for lists of messages or findings) |
+| **Node** | A function: state → partial state update (an LLM call, a tool call, plain Python) |
+| **Edge** | A fixed transition from one node to another |
+| **Conditional edge** | A function that inspects state and returns the next node name(s) |
+| **Checkpointer** | Saves state after every step, keyed by `thread_id` — enables memory, resume, human-in-the-loop and time travel |
+| **Store** | Long-term memory across threads (per user or namespace) |
+| **Interrupt** | Pauses execution for human input; resume with `Command(resume=...)` |
+| **Send** | Dynamic fan-out: run a node many times in parallel with different inputs |
+| **Subgraph** | A compiled graph used as a node inside another graph |
+
+```mermaid caption="A LangGraph run: nodes update the shared state through reducers, and the checkpointer saves a snapshot after every step."
+flowchart LR
+  ST[(Shared state<br/>messages · plan · findings)]
+  START([START]) --> A[Node: classify]
+  A --> R{Conditional edge}
+  R -- question --> B[Node: answer with RAG]
+  R -- action --> C[Node: agent]
+  B --> END([END])
+  C --> END
+  A -. update via reducers .-> ST
+  B -. update .-> ST
+  C -. update .-> ST
+  ST -. snapshot each step .-> CP[(Checkpointer<br/>per thread_id)]
+```
+
+### State and reducers
+
+```python title="state.py"
+import operator
+from typing import Annotated, TypedDict
+from langgraph.graph.message import add_messages
+
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]          # append messages (and update by message id)
+    findings: Annotated[list[str], operator.add]     # concatenate lists from parallel nodes
+    plan: str                                        # default: last write wins
+    step_count: Annotated[int, operator.add]         # sum the increments
+```
+
+<Tip>
+**Keep state lean and structured.** Store IDs, structured results and decisions in their own keys rather than everything in `messages`. Smaller state means cheaper checkpoints, clearer debugging and easier [context engineering](/learn/context-engineering/core/).
+</Tip>
+
+## Nodes, edges and routing
+
+<Level l="intermediate" />
+
+```python title="routing_graph.py"
+from langgraph.graph import END, START, StateGraph
+
+def classify(state: AgentState):
+    label = llm_label(state["messages"][-1].content)     # "question" | "action" | "chitchat"
+    return {"plan": label, "step_count": 1}
+
+def route(state: AgentState) -> str:
+    return {"question": "answer_with_rag", "action": "agent", "chitchat": "small_talk"}[state["plan"]]
+
+g = StateGraph(AgentState)
+g.add_node("classify", classify)
+g.add_node("answer_with_rag", answer_with_rag)
+g.add_node("agent", agent_node)
+g.add_node("small_talk", small_talk)
+g.add_edge(START, "classify")
+g.add_conditional_edges("classify", route, ["answer_with_rag", "agent", "small_talk"])
+for n in ("answer_with_rag", "agent", "small_talk"):
+    g.add_edge(n, END)
+app = g.compile()
+```
+
+### A tool-using agent from prebuilt pieces
+
+```python title="tool_agent.py"
+from langchain_anthropic import ChatAnthropic
+from langchain_core.tools import tool
+from langgraph.prebuilt import ToolNode, tools_condition
+
+@tool
+def get_order(order_id: str) -> dict:
+    """Get the status of an order by id (format ORD-1234)."""
+    return orders_api.get(order_id)
+
+tools = [get_order]
+model = ChatAnthropic(model="claude-sonnet-4-5", temperature=0).bind_tools(tools)
+
+def agent_node(state: AgentState):
+    return {"messages": [model.invoke(state["messages"])], "step_count": 1}
+
+g = StateGraph(AgentState)
+g.add_node("agent", agent_node)
+g.add_node("tools", ToolNode(tools))
+g.add_edge(START, "agent")
+g.add_conditional_edges("agent", tools_condition)    # -> "tools" if there are tool calls, else END
+g.add_edge("tools", "agent")
+agent = g.compile()
+```
+
+LangChain's `create_agent(model, tools, system_prompt=...)` builds this same graph in one line — good for quick starts. Build the graph yourself when you need custom steps such as guardrails, approvals or budgets.
+
+## Persistence: threads and checkpointers
+
+<Level l="advanced" />
+
+```python title="persistence.py"
+from langgraph.checkpoint.memory import MemorySaver
+# Production: from langgraph.checkpoint.postgres import PostgresSaver
+#   with PostgresSaver.from_conn_string(DB_URL) as saver:
+#       saver.setup(); app = g.compile(checkpointer=saver)
+
+app = g.compile(checkpointer=MemorySaver())
+cfg = {"configurable": {"thread_id": "user-42:chat-7"}}
+
+app.invoke({"messages": [("user", "Where is ORD-1001?")]}, cfg)
+app.invoke({"messages": [("user", "And when will it arrive?")]}, cfg)    # remembers the previous turn
+
+state = app.get_state(cfg)                            # inspect the current state
+for snapshot in app.get_state_history(cfg):           # every checkpoint (time travel)
+    print(snapshot.config["configurable"]["checkpoint_id"], snapshot.next)
+```
+
+With a checkpointer, every conversation is a **thread**. You can resume after a crash, inspect any step, or fork from an earlier checkpoint to debug ("what if the tool had returned X?").
+
+## Long-term memory with a store
+
+<Level l="advanced" />
+
+```python title="store_memory.py"
+from langchain_core.runnables import RunnableConfig
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore      # production: a Postgres-backed store
+
+store = InMemoryStore()
+
+def remember_preferences(state: AgentState, config: RunnableConfig, *, store: BaseStore):
+    user_id = config["configurable"]["user_id"]
+    fact = extract_preference(state["messages"][-1].content)     # e.g. "prefers Hindi replies"
+    if fact:
+        store.put(("users", user_id, "prefs"), key=fact["key"], value=fact)
+    return {}
+
+def personalised_answer(state: AgentState, config: RunnableConfig, *, store: BaseStore):
+    user_id = config["configurable"]["user_id"]
+    prefs = [item.value for item in store.search(("users", user_id, "prefs"))]
+    return {"messages": [model.invoke([("system", f"User preferences: {prefs}")] + state["messages"])]}
+
+app = g.compile(checkpointer=MemorySaver(), store=store)
+```
+
+**Checkpointers** hold per-thread, short-term execution state. **Stores** hold long-term memory shared across threads, namespaced by user, organisation or app. Govern what you store ([memory governance](/learn/context-engineering/core/)).
+
+## Streaming graph runs
+
+<Level l="advanced" />
+
+```python title="streaming.py"
+# node-level progress
+for update in app.stream({"messages": [("user", "Compare Q2 and Q3 revenue")]}, cfg, stream_mode="updates"):
+    print(update)                                    # {"agent": {...}} then {"tools": {...}} ...
+
+# token-level streaming of LLM output from inside nodes
+for msg_chunk, metadata in app.stream(inputs, cfg, stream_mode="messages"):
+    if metadata["langgraph_node"] == "agent" and msg_chunk.content:
+        print(msg_chunk.content, end="", flush=True)
+```
+
+Map stream events to SSE events in your API ([full-stack apps](/learn/full-stack-apps/core/)): `status` for node transitions, `token` for text, `tool` for tool calls, `interrupt` for approvals.
+
+## Human-in-the-loop patterns
+
+<Level l="advanced" />
+
+```python title="guarded_tools.py"
+from langgraph.types import Command, interrupt
+
+RISKY = {"create_refund", "send_email"}
+
+def guarded_tools(state: AgentState):
+    call = state["messages"][-1].tool_calls[0]
+    if call["name"] in RISKY:                                     # risky tools need approval
+        decision = interrupt({"tool": call["name"], "args": call["args"]})
+        if decision["action"] == "reject":
+            return {"messages": [tool_message(call, "Rejected by reviewer: " + decision.get("reason", ""))]}
+        if decision["action"] == "edit":
+            call["args"] = decision["args"]
+    return {"messages": [run_tool(call)]}
+
+# API layer: when a run returns "__interrupt__", show it in the UI. Later:
+app.invoke(Command(resume={"action": "approve"}), cfg)
+```
+
+Common patterns: approve or reject an action; edit its arguments; review and edit a draft; ask the human for missing information; validate the final output before it goes out.
+
+## Dynamic parallelism with Send
+
+<Level l="advanced" />
+
+```python title="map_reduce.py"
+from langgraph.types import Send
+
+def fan_out(state):
+    return [Send("summarise_doc", {"doc": d}) for d in state["documents"]]
+
+g.add_conditional_edges("load_docs", fan_out, ["summarise_doc"])
+g.add_edge("summarise_doc", "combine")         # combine runs after all branches finish
+```
+
+Each `Send` runs the target node with its own input, and the results merge into state through reducers (`operator.add` lists). This is the map-reduce backbone of [orchestrator–worker](/learn/agent-patterns/core/) designs.
+
+## Subgraphs for modularity
+
+<Level l="advanced" />
+
+```python title="subgraphs.py"
+research_graph = build_research_graph().compile()     # its own state and nodes
+writing_graph = build_writing_graph().compile()
+
+class Parent(TypedDict):
+    question: str
+    findings: list[str]
+    report: str
+
+pg = StateGraph(Parent)
+pg.add_node("research", research_graph)               # shared keys (question, findings) flow in and out
+pg.add_node("write", writing_graph)
+pg.add_edge(START, "research"); pg.add_edge("research", "write"); pg.add_edge("write", END)
+```
+
+Subgraphs let teams own components (retrieval, research, writing), test them on their own and reuse them.
+
+## Controlling flow with Command
+
+<Level l="advanced" />
+
+A node can update state *and* choose the next node in one return value — useful for handoffs between agents:
+
+```python title="handoff.py"
+from typing import Literal
+
+def triage(state) -> Command[Literal["billing_agent", "tech_agent"]]:
+    target = "billing_agent" if "refund" in state["messages"][-1].content.lower() else "tech_agent"
+    return Command(goto=target, update={"plan": f"handed to {target}"})
+```
+
+## Reliability features
+
+<Level l="advanced" />
+
+| Feature | How |
+|---|---|
+| Step limit | `config={"recursion_limit": 25}` raises when exceeded — catch it and return a graceful message |
+| Node retries | `g.add_node("call_api", fn, retry_policy=RetryPolicy(max_attempts=3))` |
+| Timeouts | Wrap LLM and tool calls with timeouts inside nodes |
+| Budgets | Accumulate tokens and cost in state; route to a "finish" node when over budget |
+| Idempotency | Tool calls carry idempotency keys; checkpoints make resumes safe |
+| Errors as data | Catch tool exceptions and return them as tool messages so the model can recover |
+
+## Testing LangGraph apps
+
+<Level l="advanced" />
+
+- **Unit-test nodes** as plain functions with hand-built state dictionaries.
+- **Test routing functions exhaustively** — they are pure functions of state.
+- **Graph tests with fake models:** inject a fake chat model that returns scripted tool calls, and assert the sequence of visited nodes.
+- **Evaluation runs** with real models on scenario suites (outcome, trajectory, pass^k — see [evaluating agents](/learn/agent-foundations/deep-dive/)).
+
+```python title="test_graph.py"
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+
+fake = GenericFakeChatModel(messages=iter([
+    AIMessage(content="", tool_calls=[{"name": "get_order", "args": {"order_id": "ORD-1001"}, "id": "1"}]),
+    AIMessage(content="Your order was delivered on 20 Oct.")]))
+
+# build the graph with `fake` instead of the real model, then:
+visited = [list(u.keys())[0] for u in app.stream({"messages": [("user", "status ORD-1001?")]},
+                                                 cfg, stream_mode="updates")]
+assert visited == ["agent", "tools", "agent"]
+```
+
+## Deployment
+
+<Level l="advanced" />
+
+- **Your own service:** FastAPI wraps the compiled graph, with a Postgres checkpointer and store, workers for long runs, and SSE streaming.
+- **Managed LangGraph platforms** provide hosted runtimes, persistence, scheduled jobs and a studio UI for visual debugging.
+- **Trace every run** (LangSmith, Langfuse, OpenTelemetry) with the `thread_id`, the user and the app version as metadata ([tracing](/learn/evaluation/core/)).
+
+You build a deployed LangGraph agent end to end in [Project 07](/projects/sales-data-analyst/).
+
+<Interview>
+<QA q="Why LangGraph over a simple agent loop?">
+Explicit state and control flow, built-in persistence (threads, resume, time travel), human-in-the-loop interrupts, parallel fan-out, subgraphs and streaming — all needed for production reliability.
+</QA>
+<QA q="Checkpointer vs store?">
+A checkpointer saves per-thread execution state after every step. A store holds long-term memories shared across threads, per user or namespace.
+</QA>
+<QA q="How do you require approval before a risky tool call?">
+A node calls `interrupt()` with the proposed call; the API shows it to a reviewer; you resume with `Command(resume=decision)`. The checkpointer keeps the state while waiting, even across restarts.
+</QA>
+</Interview>
+
+<Takeaways>
+- LangGraph = typed state + reducers + nodes + (conditional) edges, compiled with a checkpointer and optionally a store.
+- Use interrupts for human approval, Send for parallel fan-out, subgraphs for modularity, Command for handoffs.
+- Add recursion limits, retries, budgets and tests with fake models; trace every thread in production.
+</Takeaways>

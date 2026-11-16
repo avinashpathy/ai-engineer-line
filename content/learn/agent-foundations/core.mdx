@@ -1,0 +1,334 @@
+---
+summary: "What an AI agent is and when to build a workflow instead, the building blocks (model, tools, memory, planning, state), the tool-calling loop, writing tool descriptions, ReAct with a worked trace, single- and multi-agent patterns, memory in practice, a first look at MCP, choosing an orchestration framework, a LangGraph agent, the OpenAI Agents SDK (tools, handoffs, guardrails, sessions), and stopping runaway agents."
+---
+
+## What is an AI agent?
+
+<Level l="beginner" />
+
+An **agent** is an LLM-driven system that pursues a goal by deciding its own steps: it plans, calls tools, looks at the results and repeats until it's done.
+
+| | Chatbot | Workflow (chain) | Agent |
+|---|---|---|---|
+| Control flow | A single turn | Fixed steps written by developers | Decided at run time by the LLM |
+| Tools | None | Predetermined calls | Chooses which tools, when and how often |
+| Example | "Explain RAG" | Extract → classify → route a ticket | "Analyse last quarter's churn and email the summary" |
+| Predictability | High | High | Lower — needs guardrails |
+
+<Analogy>
+A workflow is a train on rails: fast, predictable, it only goes where the track goes. An agent is a taxi driver: you give a destination and they choose the route, reacting to traffic. You want the taxi only when you can't lay the track in advance.
+</Analogy>
+
+<Tip>
+**Start with workflows, not agents.** If you can draw the flowchart, build a workflow — it's cheaper, faster and easier to test. Use agents only when the steps genuinely can't be known in advance: open-ended research, debugging, multi-source investigation. Many successful "agentic" products are mostly workflows with one or two agentic steps.
+</Tip>
+
+## The building blocks
+
+<Level l="beginner" />
+
+1. **Model (the brain):** reasons and decides the next action. Stronger reasoning models make better agents.
+2. **Tools:** functions the agent can call — search, SQL, APIs, code execution, file I/O, other agents. Each has a name, a description and a JSON schema for its arguments.
+3. **Memory:**
+   - *Short-term:* the conversation and scratchpad in the context window.
+   - *Long-term:* facts and past experiences stored outside the model (a vector database, a key-value store) and retrieved when relevant.
+4. **Planning:** breaking a goal into steps, reflecting, and revising.
+5. **Environment and state:** what the agent can observe and change, plus execution state such as the step count and remaining budget.
+
+```mermaid caption="Every agent is this loop. Your code — not the model — runs the tools and enforces the limits."
+flowchart TD
+  G[Goal from the user] --> T[Model thinks:<br/>what next?]
+  T --> D{Done?}
+  D -- yes --> A[Final answer]
+  D -- no --> C[Model requests a tool call]
+  C --> X[Your code checks permissions<br/>and runs the tool]
+  X --> O[Observation added to context]
+  O --> B{Budget left?<br/>steps · tokens · time}
+  B -- yes --> T
+  B -- no --> H[Stop and hand over to a human]
+```
+
+## Tool calling
+
+<Level l="intermediate" />
+
+Modern LLM APIs let you declare tools. The model replies with a structured request to call one; your code runs it and sends back the result; the model continues. ([Tool calling in the API lesson](/learn/llm-apis/core/) covers the details.)
+
+```python title="weather_agent.py"
+import json
+from anthropic import Anthropic
+
+client = Anthropic()
+tools = [{
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "input_schema": {"type": "object",
+                     "properties": {"city": {"type": "string"}},
+                     "required": ["city"]}}]
+
+def get_weather(city):
+    return {"city": city, "temp_c": 27, "condition": "light rain"}
+
+messages = [{"role": "user", "content": "Should I carry an umbrella in Bengaluru today?"}]
+for _ in range(6):                                          # a step budget, always
+    resp = client.messages.create(model="claude-sonnet-4-5", max_tokens=500, tools=tools, messages=messages)
+    if resp.stop_reason != "tool_use":
+        print(resp.content[0].text)
+        break
+    messages.append({"role": "assistant", "content": resp.content})
+    results = []
+    for block in resp.content:
+        if block.type == "tool_use":
+            out = get_weather(**block.input)                 # YOUR code runs the tool
+            results.append({"type": "tool_result", "tool_use_id": block.id, "content": json.dumps(out)})
+    messages.append({"role": "user", "content": results})
+```
+
+<Pitfall>
+**Tool descriptions are prompts.** The model chooses tools from their names, descriptions and schemas. Write them like documentation for a new colleague: what it does, when to use it, what each argument means, units and formats, and what it returns. Vague tool descriptions are the most common reason agents call the wrong tool.
+</Pitfall>
+
+## Architecture patterns
+
+<Level l="intermediate" />
+
+### ReAct (reason + act)
+
+The agent alternates **Thought → Action → Observation** until it can answer.
+
+<Example title="Worked example: a ReAct trace">
+**Task:** "What was our highest-revenue product category last month, and how does it compare with the month before?"
+
+1. *Thought:* I need sales by category for two months. *Action:* `run_sql` for September, grouped by category, top 1. *Observation:* Electronics, ₹42.1 lakh.
+2. *Thought:* Now the month before, for Electronics. *Action:* `run_sql` for August, Electronics only. *Observation:* ₹36.4 lakh.
+3. *Thought:* Growth = (42.1 − 36.4) / 36.4 = 15.7%.
+
+**Final answer:** "Electronics led September with ₹42.1 lakh, up 15.7% from August."
+</Example>
+
+### Other single-agent patterns
+
+| Pattern | Idea | Good for |
+|---|---|---|
+| Plan-and-execute | Write a full plan first, then execute the steps (re-plan on failure) | Long multi-step tasks; cheaper executor models |
+| Reflection / self-critique | Generate → critique → revise | Writing, code, reports |
+| Routing | Classify the input, dispatch to a specialised chain or agent | Support triage |
+| Parallelisation | Run independent sub-tasks at once, then aggregate | Research across many sources |
+| Evaluator–optimiser | One LLM generates, another grades; loop until it passes | Quality-critical outputs |
+| Human-in-the-loop | Pause for approval at key points | Irreversible actions |
+
+Each of these is worked through in code in the [patterns cookbook](/learn/agent-patterns/core/).
+
+### Multi-agent patterns
+
+| Pattern | Structure | Example |
+|---|---|---|
+| Supervisor / orchestrator–workers | A manager agent delegates sub-tasks to specialists and merges the results | Research lead + web researcher + data analyst + writer |
+| Hierarchical | Supervisors of supervisors | Large enterprise workflows |
+| Network / swarm (handoffs) | Agents hand the conversation to each other directly | Sales agent → billing agent → support agent |
+| Debate | Agents argue, a judge decides | Higher-quality reasoning on contested questions |
+
+<Pitfall>
+**More agents is not better.** Every extra agent adds latency, cost and new failure modes — lost context in handoffs, loops, conflicting actions. Use multiple agents when tasks need genuinely different tools, permissions or context, not for decoration.
+</Pitfall>
+
+## Memory in practice
+
+<Level l="intermediate" />
+
+- **Context management:** trim or summarise old turns; keep the system prompt and key facts; watch token budgets ([context engineering](/learn/context-engineering/core/)).
+- **Long-term memory:** write important facts ("user prefers weekly reports on Monday") to a store; retrieve them with semantic search at the start of a task.
+- **Episodic memory:** store past task trajectories and outcomes; retrieve similar successful episodes as examples.
+- **State:** keep structured fields (current step, retrieved data, decisions) **outside** the LLM — more reliable than hoping the model remembers.
+
+## The Model Context Protocol (MCP), in brief
+
+<Level l="intermediate" />
+
+MCP is an open protocol for connecting AI applications to tools and data through one standard interface. A tool provider builds **one MCP server** (exposing tools, resources and prompts), and any MCP-compatible client — assistants, IDEs, agent frameworks — can use it. Think "USB-C for AI tools".
+
+```python title="hr_server.py"
+# A minimal MCP server exposing one tool (pip install "mcp[cli]")
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("hr-tools")
+
+@mcp.tool()
+def leave_balance(employee_id: str) -> dict:
+    """Return remaining leave days by type for the given employee ID."""
+    return {"casual": 4, "sick": 6, "earned": 12}
+
+if __name__ == "__main__":
+    mcp.run()          # stdio transport; register this server in any MCP client
+```
+
+The [MCP station](/learn/mcp/core/) covers clients, resources, remote servers, security and Agent Skills.
+
+## Orchestration frameworks
+
+<Level l="intermediate" />
+
+| Framework | Model | Strengths |
+|---|---|---|
+| **LangGraph** | Agents as graphs: nodes (steps), edges (transitions), shared typed state, checkpoints | Fine-grained control, loops, human-in-the-loop, persistence, streaming — a production favourite |
+| **OpenAI Agents SDK** | Agents with tools, handoffs, guardrails and sessions | Small API, built-in tracing; works with other providers too |
+| CrewAI | Role-based "crews" of agents with tasks | Quick multi-agent prototypes |
+| AutoGen / AG2 | Conversational multi-agent | Research, agent conversations, code execution |
+| LlamaIndex Workflows | Data-centric agents | RAG-heavy agents |
+| Claude Agent SDK, Google ADK, Semantic Kernel | Vendor SDKs | Tight integration with their models and tooling |
+| A plain Python loop | Your own `for` loop | Full transparency; great for learning and simple agents |
+
+### A LangGraph agent
+
+```python title="langgraph_agent.py"
+# pip install langgraph langchain-anthropic
+import ast, operator as op
+from typing import Annotated, TypedDict
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+
+OPS = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.USub: op.neg}
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate a basic arithmetic expression like '42.1/36.4 - 1'."""
+    def ev(n):
+        if isinstance(n, ast.Constant): return n.value
+        if isinstance(n, ast.BinOp): return OPS[type(n.op)](ev(n.left), ev(n.right))
+        if isinstance(n, ast.UnaryOp): return OPS[type(n.op)](ev(n.operand))
+        raise ValueError("unsupported expression")
+    return str(ev(ast.parse(expression, mode="eval").body))   # safe: no eval()
+
+@tool
+def search_policies(query: str) -> str:
+    """Search Acme's HR policy documents and return the most relevant passages."""
+    return "\n".join(d.page_content for d in retriever.invoke(query)[:3])
+
+tools = [calculator, search_policies]
+llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0).bind_tools(tools)
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+def agent(state: State):
+    return {"messages": [llm.invoke(state["messages"])]}
+
+g = StateGraph(State)
+g.add_node("agent", agent)
+g.add_node("tools", ToolNode(tools))
+g.add_edge(START, "agent")
+g.add_conditional_edges("agent", tools_condition)      # -> "tools" if a tool was requested, else END
+g.add_edge("tools", "agent")
+app = g.compile(checkpointer=MemorySaver())             # persistence = memory across turns
+
+cfg = {"configurable": {"thread_id": "user-42"}, "recursion_limit": 12}   # step budget
+out = app.invoke({"messages": [("user", "I have 12 casual leaves and used 7.5. What % is left?")]}, cfg)
+print(out["messages"][-1].content)
+```
+
+For human-in-the-loop, call `interrupt()` inside a node (or compile with `interrupt_before=["tools"]`) to pause before sensitive actions, then resume once a person approves. All of this is covered in [LangGraph in depth](/learn/langgraph/core/).
+
+## The OpenAI Agents SDK
+
+<Level l="intermediate" />
+
+The OpenAI Agents SDK (`pip install openai-agents`) is a small, opinionated framework built on four ideas:
+
+| Concept | What it is |
+|---|---|
+| **Agent** | An LLM with instructions, tools and optional structured output |
+| **Handoff** | One agent passes the conversation to another (the "network" pattern) |
+| **Guardrail** | A check that runs alongside an agent and can stop the run ("trip the wire") |
+| **Session** | Stored conversation history, so the next run remembers earlier turns |
+
+The **Runner** executes the agent loop for you, and every run is **traced** automatically.
+
+```python title="agents_sdk_demo.py"
+# pip install openai-agents    (APIs evolve: check the SDK docs for the current names)
+import asyncio
+from pydantic import BaseModel
+from agents import (Agent, GuardrailFunctionOutput, Runner, SQLiteSession,
+                    function_tool, input_guardrail)
+
+@function_tool
+def leave_balance(employee_id: str) -> dict:
+    """Return remaining leave days by type for an employee ID like 'E1001'."""
+    return {"casual": 4, "sick": 6, "earned": 12}
+
+@function_tool
+def invoice_status(invoice_id: str) -> str:
+    """Return the payment status of an invoice ID like 'INV-4412'."""
+    return "paid on 2026-11-02"
+
+class TopicCheck(BaseModel):
+    off_topic: bool
+    reason: str
+
+checker = Agent(name="Topic checker", output_type=TopicCheck,
+                instructions="Is this request unrelated to HR or finance questions at Acme?")
+
+@input_guardrail
+async def stay_on_topic(ctx, agent, user_input):
+    result = await Runner.run(checker, user_input, context=ctx.context)
+    return GuardrailFunctionOutput(output_info=result.final_output,
+                                   tripwire_triggered=result.final_output.off_topic)
+
+hr = Agent(name="HR assistant", handoff_description="Leave, attendance and HR policy questions",
+           instructions="Answer HR questions. Use tools for employee data.", tools=[leave_balance])
+finance = Agent(name="Finance assistant", handoff_description="Invoices and payments",
+                instructions="Answer invoice questions using the tool.", tools=[invoice_status])
+triage = Agent(name="Triage", instructions="Hand off to the right specialist.",
+               handoffs=[hr, finance], input_guardrails=[stay_on_topic])
+
+async def main():
+    session = SQLiteSession("user-42")                       # remembers this user's conversation
+    r = await Runner.run(triage, "How many casual leaves does E1001 have left?", session=session)
+    print(r.final_output, "| answered by:", r.last_agent.name)
+    r = await Runner.run(triage, "And is INV-4412 paid?", session=session)
+    print(r.final_output, "| answered by:", r.last_agent.name)
+
+asyncio.run(main())
+```
+
+If a guardrail trips, the run raises an `InputGuardrailTripwireTriggered` exception, which your API turns into a polite refusal. The SDK also supports **agents as tools** (a manager calls specialists like functions and keeps control, the supervisor pattern), MCP servers as tool sources, and non-OpenAI models through LiteLLM.
+
+| Choose… | When |
+|---|---|
+| OpenAI Agents SDK | You want a small API with handoffs, guardrails and tracing out of the box |
+| LangGraph | You need explicit control of state, branching, checkpoints, long-running workflows and interrupts |
+| Plain Python | One agent, a few tools, and you want every line visible |
+
+## Stopping runaway agents
+
+<Level l="intermediate" />
+
+Agents can loop, wander or overspend. Always enforce, **in your code**:
+
+- a **step / recursion limit** (for example 8–15 tool calls);
+- **token and cost budgets** per task, and a **timeout**;
+- **loop detection** — the same tool with the same arguments repeated;
+- **human approval** before irreversible actions;
+- a **fallback** — stop, summarise what was done, and hand over to a person.
+
+<Interview>
+<QA q="Workflow or agent?">
+If the sequence of steps is known, a workflow — deterministic, testable, cheap. An agent only when the path depends on intermediate results and can't be enumerated in advance.
+</QA>
+<QA q="How do you stop an agent looping forever?">
+Step and recursion limits, token and cost budgets, timeouts, loop detection (the same tool and arguments repeated) and a fallback to a human — all enforced by the code around the model, not by the prompt.
+</QA>
+<QA q="What's the difference between a handoff and an agent-as-tool?">
+With a handoff, control passes to the other agent, which talks to the user from then on. With an agent-as-tool, the manager calls the specialist like a function, gets its result back and stays in charge — the supervisor pattern.
+</QA>
+</Interview>
+
+<Takeaways>
+- An agent is a loop: think → act with a tool → observe → repeat, inside budgets your code enforces.
+- Prefer workflows; add agentic steps only where the path can't be known in advance.
+- Tool descriptions are prompts. Pick the simplest framework that fits: plain Python, the OpenAI Agents SDK, or LangGraph for complex stateful flows.
+</Takeaways>

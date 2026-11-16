@@ -1,0 +1,357 @@
+---
+summary: "Six composable agent patterns implemented in plain Python — prompt chaining with gates, routing (with cost maths), parallelisation (sectioning and voting), orchestrator–workers, evaluator–optimiser with sandboxed tests, and the autonomous loop — plus human approval with LangGraph interrupts and durable execution, vendor agent SDKs, choosing an approach, designing tools agents use well, and failure modes with loop detection."
+---
+
+## Patterns, not magic
+
+<Level l="intermediate" />
+
+Most successful "agentic" products are built from a handful of composable patterns, not fully autonomous agents. This lesson implements each pattern in plain, framework-free Python so you understand the mechanics.
+
+```mermaid caption="Six patterns, from most predictable to most autonomous. Use the simplest one that solves the task."
+flowchart LR
+  P1[1 · Prompt chain<br/>fixed steps + gates] --> P2[2 · Routing<br/>classify, dispatch]
+  P2 --> P3[3 · Parallelisation<br/>sections or votes]
+  P3 --> P4[4 · Orchestrator–workers<br/>dynamic sub-tasks]
+  P4 --> P5[5 · Evaluator–optimiser<br/>generate, grade, loop]
+  P5 --> P6[6 · Autonomous agent<br/>model picks every step]
+```
+
+All the examples use two small helpers — one for text, one for validated structured output:
+
+```python title="helpers.py"
+import asyncio, json
+from anthropic import AsyncAnthropic
+from pydantic import BaseModel
+
+aclient = AsyncAnthropic()
+MODEL, SMALL = "claude-sonnet-4-5", "claude-haiku-4-5"     # replace with current model names
+
+async def llm(prompt: str, system: str = "", model: str = MODEL, max_tokens: int = 1500) -> str:
+    r = await aclient.messages.create(model=model, max_tokens=max_tokens, system=system,
+                                      messages=[{"role": "user", "content": prompt}])
+    return r.content[0].text
+
+async def llm_json(prompt: str, schema: type[BaseModel], model: str = MODEL) -> BaseModel:
+    r = await aclient.messages.create(
+        model=model, max_tokens=1500,
+        tools=[{"name": "out", "description": "Return the result.", "input_schema": schema.model_json_schema()}],
+        tool_choice={"type": "tool", "name": "out"},
+        messages=[{"role": "user", "content": prompt}])
+    return schema.model_validate(next(b.input for b in r.content if b.type == "tool_use"))
+```
+
+## Pattern 1 — Prompt chaining with gates
+
+<Level l="intermediate" />
+
+Break a task into fixed sequential steps. Each step's output feeds the next, with programmatic checks (**gates**) between them.
+
+**Use when** the task splits cleanly into known steps: outline → draft → polish; extract → validate → summarise.
+
+```python title="chain.py"
+class Outline(BaseModel):
+    title: str
+    sections: list[str]
+
+async def write_blog_post(topic: str, audience: str) -> str:
+    outline = await llm_json(f"Create an outline (4-6 sections) for a blog post on '{topic}' for {audience}.", Outline)
+    if not 4 <= len(outline.sections) <= 6:                       # gate: structural check
+        outline = await llm_json(f"Create exactly 5 sections for a post on '{topic}'.", Outline)
+    draft = await llm(f"Write the post '{outline.title}' with sections {outline.sections}. "
+                      f"About 900 words, for {audience}.")
+    issues = await llm(f"List factual claims in this draft that need a source, one per line, or 'NONE'.\n\n{draft}",
+                       model=SMALL)
+    return await llm(f"Polish this draft for clarity. Where these claims appear, soften them or flag "
+                     f"[citation needed]:\n{issues}\n\n<draft>{draft}</draft>")
+```
+
+## Pattern 2 — Routing
+
+<Level l="intermediate" />
+
+Classify the input, then send it to a specialised prompt, model or pipeline.
+
+**Use when** inputs fall into distinct categories that need different handling, or when easy queries can go to cheaper models.
+
+```python title="routing.py"
+from typing import Literal
+
+class Route(BaseModel):
+    category: Literal["billing", "technical", "general"]
+    complexity: Literal["simple", "complex"]
+
+HANDLERS = {
+    "billing": "You are a billing specialist. Explain charges clearly and cite the billing policy.",
+    "technical": "You are a support engineer. Give step-by-step troubleshooting.",
+    "general": "You are a friendly assistant for general questions."}
+
+async def route_and_answer(query: str) -> str:
+    r = await llm_json(f"Classify this support query:\n{query}", Route, model=SMALL)   # cheap router
+    model = MODEL if r.complexity == "complex" else SMALL                            # cost routing
+    return await llm(query, system=HANDLERS[r.category], model=model)
+```
+
+<Example title="Worked example: routing economics">
+70% of queries are simple, and the small model costs one tenth of the large one.
+
+Per-query cost becomes 0.7 × 0.1 + 0.3 × 1.0 = **0.37** of the original — a **63% saving**, plus the router's own small cost.
+
+Validate the router's accuracy: a complex query sent to the small model is a quality failure.
+</Example>
+
+## Pattern 3 — Parallelisation
+
+<Level l="intermediate" />
+
+Run independent LLM calls at the same time, then aggregate. Two variants:
+
+- **Sectioning:** split a task into independent parts (review security, performance and style separately).
+- **Voting:** run the same task several times, or with different prompts, and take the majority or the most conservative answer. This raises confidence on high-stakes judgements.
+
+```python title="parallel.py"
+async def review_contract(text: str) -> dict:
+    aspects = {"liability": "Identify liability caps and indemnities.",
+               "termination": "Identify termination rights and notice periods.",
+               "data": "Identify data-protection and confidentiality obligations.",
+               "payment": "Identify payment terms, penalties and late fees."}
+    results = await asyncio.gather(*(llm(f"{instr}\nQuote clauses.\n<contract>{text}</contract>", model=SMALL)
+                                     for instr in aspects.values()))
+    return dict(zip(aspects, results))
+
+class Verdict(BaseModel):
+    unsafe: bool
+    reason: str
+
+async def is_unsafe(content: str, votes: int = 3) -> bool:
+    vs = await asyncio.gather(*(llm_json("Does this content violate the policy (harassment, threats, "
+                                         f"personal-data exposure)?\n{content}", Verdict, model=SMALL)
+                                for _ in range(votes)))
+    return sum(v.unsafe for v in vs) >= 2                               # majority vote
+```
+
+## Pattern 4 — Orchestrator–workers
+
+<Level l="advanced" />
+
+A central LLM plans sub-tasks **on the fly**, delegates them to workers (often in parallel) and combines the results. Unlike sectioning, the sub-tasks aren't known in advance.
+
+**Use when** the breakdown depends on the input: research questions, multi-file code changes, comparing an unknown number of options.
+
+```python title="orchestrator.py"
+class Plan(BaseModel):
+    subtasks: list[str]
+
+async def research(question: str) -> str:
+    plan = await llm_json(f"Break this research question into 3-6 independent sub-questions:\n{question}", Plan)
+
+    async def worker(sub):
+        evidence = await web_search_tool(sub)                           # a tool call
+        return await llm("Answer the sub-question using only the evidence. Cite URLs.\n"
+                         f"Sub-question: {sub}\nEvidence: {evidence}", model=SMALL)
+
+    findings = await asyncio.gather(*(worker(s) for s in plan.subtasks))
+    joined = "\n\n".join(f"## {s}\n{f}" for s, f in zip(plan.subtasks, findings))
+    return await llm(f"Write a report answering: {question}\nKeep citations. Note disagreements.\n\n{joined}")
+```
+
+## Pattern 5 — Evaluator–optimiser
+
+<Level l="advanced" />
+
+One LLM generates; an evaluator — an LLM with a rubric or, better, **executable tests** — gives feedback. Loop until the output passes or the budget runs out.
+
+**Use when** there are clear evaluation criteria and iterating helps: code that must pass tests, translations that must keep terminology, outputs that must satisfy a checklist.
+
+```python title="evaluator_optimiser.py"
+import pathlib, subprocess, tempfile
+
+async def write_code_until_tests_pass(spec: str, tests: str, max_iters: int = 4) -> str:
+    feedback = ""
+    for _ in range(max_iters):
+        code = await llm(f"Write a Python module implementing:\n{spec}\n"
+                         + (f"The previous attempt failed with:\n{feedback}\n" if feedback else "")
+                         + "Return only code, no fences.")
+        with tempfile.TemporaryDirectory() as d:
+            pathlib.Path(d, "solution.py").write_text(code)
+            pathlib.Path(d, "test_solution.py").write_text(tests)
+            # In production, run this inside a sandbox (see the warning below)
+            r = subprocess.run(["python", "-m", "pytest", "-q", d], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            return code
+        feedback = r.stdout[-3000:]                 # the test output IS the evaluator's feedback
+    raise RuntimeError(f"tests still failing after {max_iters} attempts")
+```
+
+<Pitfall>
+**Sandbox generated code.** Running model-written code on your machine or servers is dangerous. Use isolated containers or sandboxes with no network, no secrets, CPU/memory/time limits and a throw-away filesystem — for example Docker with `--network none`, gVisor, Firecracker micro-VMs or a managed code-execution sandbox.
+</Pitfall>
+
+## Pattern 6 — The autonomous agent
+
+<Level l="advanced" />
+
+The model decides which tool to call next, looks at the result, and continues until done ([the loop](/learn/agent-foundations/deep-dive/)). Use it only when the steps are genuinely unpredictable, and always give it:
+
+- a clear goal and success criteria;
+- a small, well-described tool set;
+- step, time and cost budgets;
+- checkpoints and human approval for risky actions;
+- a way to say "I'm stuck" and escalate.
+
+## Human approval and durable execution
+
+<Level l="advanced" />
+
+LangGraph's `interrupt()` pauses a graph mid-run, saves its state, and resumes when a person responds.
+
+```python title="approval.py"
+from typing import TypedDict
+from langgraph.checkpoint.memory import MemorySaver     # use a Postgres or Redis checkpointer in production
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+
+class State(TypedDict):
+    request: str
+    proposed_email: str
+    status: str
+
+async def draft(state: State):
+    return {"proposed_email": await llm(f"Draft a reply email for: {state['request']}")}
+
+def approve(state: State):
+    decision = interrupt({"type": "approval", "email": state["proposed_email"]})   # pauses here
+    if decision["action"] == "approve":
+        return {"status": "approved"}
+    if decision["action"] == "edit":
+        return {"proposed_email": decision["email"], "status": "approved"}
+    return {"status": "rejected"}
+
+def send(state: State):
+    if state["status"] == "approved":
+        email_api.send(state["proposed_email"])
+    return {}
+
+g = StateGraph(State)
+g.add_node("draft", draft); g.add_node("approve", approve); g.add_node("send", send)
+g.add_edge(START, "draft"); g.add_edge("draft", "approve"); g.add_edge("approve", "send"); g.add_edge("send", END)
+app = g.compile(checkpointer=MemorySaver())
+
+cfg = {"configurable": {"thread_id": "ticket-981"}}
+first = await app.ainvoke({"request": "Customer asks for an invoice copy for September"}, cfg)   # stops at interrupt
+print(first["__interrupt__"])                                         # show this to the reviewer in your UI
+final = await app.ainvoke(Command(resume={"action": "approve"}), cfg)  # resumes after approval
+```
+
+The checkpointer stores the state, so approval can come minutes or days later, from another process, even after a restart. This is **durable execution**. For long business workflows, durable engines such as **Temporal** add retries, timers and exactly-once guarantees around agent steps.
+
+## Vendor agent SDKs
+
+<Level l="advanced" />
+
+The [OpenAI Agents SDK](/learn/agent-foundations/core/) is covered with the foundations. The **Claude Agent SDK** packages an agent loop with built-in tools (reading and editing files, shell, web), permission controls, context management, sub-agents and MCP support — useful for coding and operations agents:
+
+```python title="claude_agent_sdk_demo.py"
+# pip install claude-agent-sdk
+import asyncio
+from claude_agent_sdk import ClaudeAgentOptions, query
+
+async def main():
+    opts = ClaudeAgentOptions(system_prompt="You are a careful code reviewer.",
+                              allowed_tools=["Read", "Grep", "Glob"],   # read-only tool set
+                              max_turns=10)
+    async for message in query(prompt="Find where OAuth tokens are refreshed and list risks.", options=opts):
+        print(message)
+
+asyncio.run(main())
+```
+
+<Note>
+**SDKs evolve quickly.** Agent SDK APIs change between releases, so treat these snippets as orientation and check the current documentation. The concepts are stable across SDKs: an agent definition, tools, handoffs or sub-agents, guardrails, sessions and tracing.
+</Note>
+
+## Choosing an approach
+
+<Level l="intermediate" />
+
+| Need | Choose |
+|---|---|
+| Learning, a simple tool loop, full transparency | A plain Python loop |
+| Complex stateful flows, branching, human approval, persistence | LangGraph |
+| A quick role-based multi-agent prototype | CrewAI |
+| Tight integration with one provider's tools and tracing | That provider's agent SDK |
+| Coding, file or shell agents with permissions | The Claude Agent SDK and similar coding-agent frameworks |
+| Long-running business processes with guarantees | A durable workflow engine (Temporal) + LLM steps |
+
+## Designing tools agents use well
+
+<Level l="intermediate" />
+
+| Principle | Example |
+|---|---|
+| Few high-level tools beat many low-level ones | `schedule_meeting(attendees, duration, window)` instead of list_calendars + get_free_busy + create_event |
+| Names and descriptions are prompts | Say when to use it, when not to, units and formats |
+| Return concise, relevant data | The top 10 rows and a count, not 10,000 rows |
+| Helpful errors | "No order ORD-12; IDs look like ORD-1001. Ask the customer to check." |
+| Idempotent writes | Pass an idempotency key so retries don't charge twice |
+| Consistent schemas | The same field names across tools (`customer_id` everywhere) |
+| Permission-aware | The tool enforces what this user may do; the model can't override it |
+| Paginate and filter | `search_tickets(query, status, limit=20, cursor=None)` |
+
+<Example title="Worked example: tool consolidation">
+An agent needed **6 calls** to answer "Where's my order?": search customer → list orders → get order → get shipment → get carrier status → format.
+
+A single `get_order_overview(order_id)` tool returning status, shipment and ETA cut it to **1 call**. Latency fell from 9 s to 2 s, token cost fell by 70%, and wrong-tool errors disappeared.
+</Example>
+
+## Failure modes and mitigations
+
+<Level l="advanced" />
+
+| Failure | Mitigation |
+|---|---|
+| Loops: the same tool with the same arguments | Detect repeats; tell the model "you already tried X"; a hard step cap |
+| Declaring "done" too early | Explicit success criteria; a verifier step; a checklist |
+| Hallucinated tool arguments | Schema validation; enums; lookup tools for IDs |
+| Context overflow in long runs | Compaction, sub-agents, trimmed outputs ([context engineering](/learn/context-engineering/core/)) |
+| Plans that ignore new information | Re-plan after each major observation |
+| Errors cascading across agents | Validate intermediate outputs; structured handoffs |
+| Unsafe actions | Least privilege, approvals, sandboxing, audit logs ([LLM security](/learn/alignment-safety/deep-dive/)) |
+
+```python title="loop_guard.py"
+import hashlib, json
+
+class LoopGuard:
+    """Stops an agent that keeps repeating the same tool call."""
+
+    def __init__(self, max_repeats=2, max_steps=12):
+        self.seen, self.steps, self.max_repeats, self.max_steps = {}, 0, max_repeats, max_steps
+
+    def check(self, tool: str, args: dict) -> str | None:
+        self.steps += 1
+        if self.steps > self.max_steps:
+            return "STOP: step budget exhausted. Summarise progress and ask a human."
+        key = hashlib.sha256(f"{tool}:{json.dumps(args, sort_keys=True)}".encode()).hexdigest()
+        self.seen[key] = self.seen.get(key, 0) + 1
+        if self.seen[key] > self.max_repeats:
+            return f"You already called {tool} with these arguments. Try a different approach or finish."
+        return None                                    # OK to run the tool
+```
+
+<Interview>
+<QA q="Orchestrator–workers vs parallel sectioning?">
+Sectioning splits a task into parts you know in advance. Orchestrator–workers lets an LLM decide the sub-tasks at run time, because they depend on the input.
+</QA>
+<QA q="How would you add human approval to an agent that sends emails?">
+Pause the run before the send step (a LangGraph interrupt), store the state in a durable checkpointer, show the draft to a reviewer, and resume with approve, edit or reject. The send tool itself also checks that an approval exists.
+</QA>
+<QA q="What makes a good agent tool?">
+Few and high-level, with descriptions that say when to use it, concise outputs, helpful error messages, consistent schemas, idempotent writes and permission checks inside the tool.
+</QA>
+</Interview>
+
+<Takeaways>
+- Master six patterns: chaining, routing, parallelisation, orchestrator–workers, evaluator–optimiser and the autonomous loop. Use the simplest that works.
+- Human approval and durable execution need checkpointed state (LangGraph interrupts, workflow engines).
+- Tool design — few, high-level, concise, permission-aware, idempotent — affects agent quality more than the framework does.
+</Takeaways>
