@@ -1,0 +1,210 @@
+---
+summary: "A ten-step framework for GenAI system design interviews with back-of-envelope numbers, then eight worked case studies — enterprise knowledge assistant, fintech support automation, AI coding assistant, insurance claims processing, an agentic incident-response assistant, a learning tutor at scale, a text-to-SQL analytics copilot and a voice booking agent — plus the follow-up questions interviewers ask and what strong answers contain."
+---
+
+## How GenAI system design interviews work
+
+<Level l="intermediate" />
+
+GenAI system design interviews follow the classic format — **requirements → design → deep dives → trade-offs** — with extra emphasis on retrieval, model choice, evaluation, cost and safety. Every case below uses the same framework, so practise it until it's automatic.
+
+## The framework
+
+<Level l="intermediate" />
+
+1. **Clarify:** users, use cases, scale (users, queries per second, documents), latency, languages, data sensitivity, accuracy expectations — and what happens when the system is wrong.
+2. **Success metrics:** business (resolution rate, time saved), quality (faithfulness, task success), operational (p95 latency, cost per request).
+3. **High-level architecture:** clients → API → orchestration → models / retrieval / tools → storage; ingestion pipelines; observability.
+4. **Model strategy:** API vs self-hosted; large vs small; routing; fine-tuning or not, and why.
+5. **Data and retrieval:** sources, parsing, chunking, embeddings, index, hybrid search, re-ranking, freshness, permissions.
+6. **Orchestration:** workflow vs agent; tools; memory; human-in-the-loop.
+7. **Evaluation:** offline golden sets, LLM judges, online feedback, A/B tests, regression gates.
+8. **Safety and security:** injection, personal data, access control, guardrails, audit.
+9. **Scale, latency and cost:** caching, batching, streaming, quotas, capacity estimates.
+10. **Failure modes and fallbacks:** provider outage, bad retrieval, hallucination, tool errors.
+
+```mermaid caption="The architecture most GenAI designs start from. Each case study changes which boxes matter most."
+flowchart TD
+  C[Clients · web · Slack · phone] --> API[API + auth<br/>rate limits · quotas]
+  API --> O[Orchestration<br/>workflow or agent · guardrails]
+  O --> M[Models via gateway<br/>large · small · fallback]
+  O --> R[Retrieval<br/>hybrid search · re-rank · ACL filter]
+  O --> T[Tools<br/>scoped · risk-gated]
+  R --> IDX[(Indexes)]
+  SRC[(Sources)] --> ING[Ingestion pipeline<br/>parse · chunk · embed · ACL sync] --> IDX
+  O --> OBS[Observability + evals<br/>traces · metrics · feedback]
+```
+
+### Do the numbers
+
+<Example title="Worked example: a back-of-envelope estimate">
+"20,000 employees, 30% weekly active, 5 questions per active user per week → **30,000 questions a week**. That's about **0.05 queries per second** on average — maybe 2 QPS at peak.
+
+With 3,000 input and 400 output tokens per question, at $3 / $15 per million tokens, each question costs 3,000 × 3/10⁶ + 400 × 15/10⁶ = **$0.015**, so about **$450 a week**.
+
+So cost isn't the bottleneck here; quality and permissions are."
+</Example>
+
+Interviewers love quick estimates like this. They show you know where the real constraint is.
+
+## Case 1 — Enterprise knowledge assistant
+
+<Level l="advanced" />
+
+**Requirements:** 20,000 employees; Confluence, SharePoint, Google Drive and PDFs (about 1 million documents); answers with citations; strict permissions; English plus Indian languages; p95 below 6 s.
+
+**Design highlights:**
+
+- **Ingestion:** connectors with incremental sync *and ACL sync*; layout-aware PDF parsing and OCR for scans; structure-aware chunks with contextual headers; batch embeddings; a hybrid index (vector + BM25) with ACL metadata; blue–green re-indexing when the embedding model changes.
+- **Query path:** SSO → query rewrite with history → retrieval filtered by the user's groups → cross-encoder re-rank → relevance threshold → generation with mandatory citations → output guardrails → stream.
+- **Model strategy:** a strong API model for answers; a small model for rewriting and routing; prompt caching for the system prompt.
+- **Evaluation:** a golden set per department, including unanswerable questions; permission tests with synthetic users; online thumbs and sampled faithfulness scoring.
+- **Risks:** permission leakage (filter *inside* the search query — never post-filter in the LLM); stale content (show last-updated dates, boost fresh content); injection through editable wiki pages (treat retrieved text as data; no action tools in this assistant).
+
+**Likely follow-ups:**
+
+- *"A document's permissions change. What happens?"* ACL-sync events update chunk metadata within minutes, with a periodic full reconciliation.
+- *"How do you support Hindi questions over English documents?"* Multilingual embeddings, or translate the query; answer in the user's language.
+
+Lessons behind this case: [RAG foundations](/learn/rag-foundations/core/), [advanced RAG](/learn/advanced-rag/core/), [production RAG](/learn/production-rag/core/).
+
+## Case 2 — Customer-support automation for a fintech app
+
+<Level l="advanced" />
+
+**Requirements:** 2 million monthly users; chat support; must never give wrong financial information; a regulatory audit trail; Hindi and English; escalation to people.
+
+**Design highlights:**
+
+- **Intent routing:** a small fine-tuned classifier for 40 intents — fast, cheap, auditable. Sensitive intents (fraud, disputes, KYC) go straight to people or to scripted flows.
+- **Answering:** RAG over **approved help articles only** (no open web); tool calls for account data with the user's own scoped token; **deterministic templates** for regulated statements (interest rates, fees) filled from systems of record, not generated freely.
+- **Safety:** personal-data redaction in logs; no money movement through the bot without explicit confirmation and authentication; refuse and escalate advice-like questions ("should I invest…").
+- **Audit:** store prompts, retrieved sources, tool calls and responses with retention per regulation; versioned prompts and models.
+- **Metrics:** containment rate, satisfaction, escalation correctness, error rate on sampled audits (target near zero for financial facts), cost per resolved conversation.
+
+## Case 3 — AI coding assistant for an engineering organisation
+
+<Level l="advanced" />
+
+**Requirements:** 1,500 engineers; code Q&A over 3,000 repositories; PR review suggestions; code must not leave the company.
+
+**Design highlights:**
+
+- **Model hosting:** an enterprise API with zero data retention under contract, or self-hosted open code models on GPUs inside the VPC.
+- **Code index:** symbol-level chunks (AST / tree-sitter); repository maps; hybrid search (identifiers + embeddings); incremental indexing on push webhooks; per-repo permissions from the Git provider.
+- **PR review:** a GitHub/GitLab app; review only the changed hunks plus retrieved context; structured findings with confidence; a cap on comments per PR; advisory, never blocking at first.
+- **Evaluation:** a seeded-bug benchmark from historical fixes (recall), the false-positive rate on clean PRs (precision), the developer acceptance rate of suggestions.
+- **Cost control:** review only when a PR is ready (a label or command trigger); skip generated files and lockfiles.
+
+You build a version of this in [Project 06](/projects/code-review-assistant/).
+
+## Case 4 — Document processing for insurance claims
+
+<Level l="advanced" />
+
+**Requirements:** 50,000 claims a month with PDFs, photos and handwritten forms; extract 40 fields; detect missing documents; flag potential fraud; **people make the final decisions**.
+
+**Design highlights:**
+
+- **Pipeline:** classify document types → OCR or vision-LLM extraction per type with schemas → cross-document consistency checks (policy number, dates, amounts) → rules and an anomaly model for fraud indicators → a reviewer UI that highlights the evidence.
+- **Confidence routing:** auto-fill high-confidence fields; route discrepancies to adjusters; **never auto-deny a claim**.
+- **Learning loop:** adjuster corrections become labelled data; per-field accuracy dashboards; periodic fine-tuning of a smaller extraction model to cut cost.
+- **Governance:** a high-risk decision domain, so a person stays the decision-maker; an explanation for every flag; bias monitoring across regions and demographics ([governance](/learn/governance/core/)).
+
+## Case 5 — Agentic operations assistant for incident response
+
+<Level l="advanced" />
+
+**Requirements:** help on-call engineers diagnose incidents faster using logs, metrics, deploy history and runbooks; can execute safe remediations.
+
+```mermaid caption="The incident assistant gathers context in parallel, proposes, and waits for a person before changing anything."
+flowchart TD
+  AL[Alert fires] --> G[Gather in parallel<br/>logs · metrics · deploys · runbooks · past incidents]
+  G --> H[Agent ranks hypotheses<br/>with evidence]
+  H --> P[Proposes a remediation<br/>restart · scale · rollback]
+  P --> AP{On-call approves<br/>in Slack / Teams?}
+  AP -- no --> H
+  AP -- yes --> X[Execute with scoped account]
+  X --> V[Verify recovery]
+  V --> PM[Draft post-mortem timeline]
+```
+
+**Design highlights:**
+
+- **Tools:** read-only log and metric queries, deploy history, runbook RAG, past-incident search; remediation tools (restart, scale, rollback) classified **high risk**, requiring on-call approval.
+- **Evaluation:** replay 50 past incidents — did it find the known root cause in its top three hypotheses? — time to diagnosis against historical numbers, and **zero unapproved actions**.
+- **Safety:** scoped service accounts per tool, dry-run modes, change-freeze awareness, a complete audit trail, a kill switch.
+
+## Case 6 — A personalised learning tutor at scale
+
+<Level l="advanced" />
+
+**Requirements:** 500,000 students; tutoring in English and regional languages; grounded in the syllabus; age-appropriate; cost under **₹10 per student per month**.
+
+**Design highlights:**
+
+- **Grounding:** RAG over curriculum materials per grade and subject; pedagogy prompts (Socratic hints rather than direct answers for homework).
+- **Safety:** strict content filters for minors, refusal of off-topic or unsafe requests, no unnecessary personal data, visibility for parents and teachers.
+- **Cost engineering:** small models for most turns; a large model only for complex explanations; aggressive prompt caching of syllabus context; semantic caching of common questions; per-student daily token caps.
+- **Evaluation:** a pedagogy rubric (hint quality, correctness, encouragement) judged by an LLM and validated by teachers; learning outcomes measured by quiz improvement in an A/B test.
+
+<Example title="Worked example: does ₹10 a month work?">
+Suppose a student has **60 tutor turns a month**, averaging 2,500 input tokens (mostly cached syllabus context) and 300 output tokens.
+
+The budget per turn is ₹10 / 60 ≈ **₹0.17**. That rules out sending every turn to a large model at full price — it pushes you to small models, cached prompts and per-student caps. Saying this out loud is exactly the kind of reasoning interviewers want; redo it with current prices.
+</Example>
+
+## Case 7 — Text-to-SQL analytics copilot
+
+<Level l="advanced" />
+
+**Requirements:** 300 business users ask questions about sales, inventory and finance data in a warehouse; correctness matters; some data is restricted by role.
+
+**Design highlights:**
+
+- **Semantic layer:** curated metrics and dimensions (net revenue, active customers, the fiscal calendar) are the vocabulary for SQL generation. This greatly improves correctness.
+- **Pipeline:** question → retrieve the relevant schema and metrics → few-shot examples from a verified query library → generate SQL → validate (parse, allow-listed tables, row-level security through the **user's own warehouse role**, LIMIT) → execute → summary and chart → **show the SQL**.
+- **Evaluation:** 200 verified question → result pairs; execution-result accuracy; human review of new query patterns before they join the library.
+- **Trust:** always display the SQL and the definitions used; let users flag wrong answers; corrections go into the library.
+
+Details in [text-to-SQL](/learn/advanced-rag/deep-dive/) and [Project 07](/projects/sales-data-analyst/).
+
+## Case 8 — A voice agent for appointment booking
+
+<Level l="advanced" />
+
+**Requirements:** phone calls in Hindi and English for a clinic network; book, reschedule and cancel appointments; under 1 s response latency; strong privacy expectations for health information.
+
+**Design highlights:**
+
+- **Pipeline:** telephony → streaming speech recognition → LLM with scheduling tools → streaming text-to-speech; barge-in handling; end-of-turn detection.
+- **Latency budget:** final transcript 200 ms + LLM first token 300 ms + first audio 200 ms = **700 ms**, leaving headroom under 1 s. Use fillers while tools run ("Let me check Dr. Rao's availability").
+- **Tools:** `find_slots`, `book`, `reschedule`, `cancel` — with patient verification before any change, and a confirmation read-back before committing.
+- **Safety and privacy:** no medical advice; escalate symptoms or emergencies to people or emergency guidance; minimal retention; a consent notice at the start of calls; encrypted, access-controlled recordings.
+- **Metrics:** booking completion rate, transfer-to-human rate, average handling time, speech-recognition word error rate on names and dates, caller satisfaction.
+
+Background: [voice AI](/learn/multimodal-voice/voice/) and [Project 10](/projects/voice-receptionist/).
+
+## Common follow-up questions
+
+<Level l="intermediate" />
+
+| Question | Strong answers include |
+|---|---|
+| "How do you know it's working?" | Golden sets, online metrics, sampled human review, A/B tests, dashboards |
+| "What if the LLM provider goes down?" | A gateway with fallback models and providers, cached answers for FAQs, graceful degradation messages, status monitoring |
+| "How do you reduce hallucinations?" | Grounding and citations, "not found" behaviour, relevance thresholds, faithfulness checks, constrained outputs, human review for high stakes |
+| "How would you cut cost by 50%?" | Routing to small models, prompt caching, fewer and better chunks, output limits, semantic cache, batch for offline work, a fine-tuned small model |
+| "RAG or fine-tuning here?" | Changing knowledge → RAG; behaviour, format, latency or cost at scale → fine-tuning; often both |
+| "How do you prevent data leaks?" | ACLs inside retrieval queries, tenant isolation, personal-data redaction, no secrets in prompts, least-privilege tools, audit logs |
+| "How do you handle prompt injection?" | Treat external content as data, isolate tools, allow-lists, confirmations for side effects, injection classifiers, a red-team suite in CI |
+
+<Tip>
+**Manage the clock.** In a 45-minute interview, spend about 5 minutes clarifying and estimating, 10 on the high-level design, 20 on two or three deep dives the interviewer cares about (usually retrieval, evaluation or safety), and the last 10 on trade-offs, failure modes and what you'd build first.
+</Tip>
+
+<Takeaways>
+- Use the same ten-step framework every time, and do quick numbers early to find the real constraint.
+- Most designs share one skeleton — API, orchestration, models behind a gateway, retrieval with permissions, scoped tools, ingestion, observability — and differ in which parts carry the risk.
+- Strong answers always cover evaluation, safety, cost and what happens when things fail.
+</Takeaways>

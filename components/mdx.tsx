@@ -34,6 +34,7 @@ export const mdxComponents = {
   Takeaways: (p: P) => <Callout kind="takeaways" {...p} />,
   Interview: (p: P) => <Callout kind="interview" {...p} />,
   QA: ({ q, children }: { q: string; children?: ReactNode }) => <details className="qa"><summary>{q}</summary><div>{children}</div></details>,
+  Solution: ({ children }: { children?: ReactNode }) => <details className="qa solution"><summary>Show solution</summary><div>{children}</div></details>,
   Level: ({ l }: { l: "beginner" | "intermediate" | "advanced" }) => <span className="lvl" data-level={l}>{l}</span>,
   Mermaid,
   ...D,
