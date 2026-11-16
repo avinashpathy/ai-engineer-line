@@ -1,0 +1,144 @@
+---
+summary: "Why agents raise the stakes, the risk categories for agentic systems, the frameworks and regulations that apply (NIST AI RMF, EU AI Act, ISO/IEC 42001, OWASP, India's DPDP Act), risk tiering by impact and autonomy, eight layers of guardrails with risk-gated tool execution in code, human-in-the-loop vs on-the-loop vs out-of-the-loop, and how organisations govern AI."
+---
+
+## Why agents raise the stakes
+
+<Level l="beginner" />
+
+A chatbot that's wrong produces bad text. An agent that's wrong takes **bad actions**: deletes records, sends emails, moves money, changes access rights — at machine speed and scale. Governance has to grow with autonomy and impact.
+
+## Risk categories for agentic systems
+
+<Level l="intermediate" />
+
+| Risk | Example |
+|---|---|
+| Excessive agency | An agent given broad database write access "just in case" deletes rows |
+| Prompt injection and tool misuse | A malicious web page tells the agent to send data out through an HTTP tool |
+| Goal misinterpretation | "Reduce the support backlog" → the agent closes tickets without solving them |
+| Cascading errors | One wrong intermediate result spreads through later steps or agents |
+| Privacy violations | The agent compiles personal data from several systems |
+| Accountability gaps | Nobody can explain or reproduce why an action happened |
+| Over-reliance / automation bias | People rubber-stamp the agent's recommendations |
+| Credential security | Agents holding long-lived, powerful API keys |
+
+## Frameworks and regulation
+
+<Level l="intermediate" />
+
+| Framework | Key ideas |
+|---|---|
+| **NIST AI Risk Management Framework** | Four functions — **Govern** (culture, roles, policies), **Map** (context, risks), **Measure** (assess, test), **Manage** (prioritise, respond, monitor) — plus a Generative AI profile |
+| **EU AI Act** | Risk tiers: *unacceptable* (banned, e.g. social scoring); *high-risk* (hiring, credit, critical infrastructure — risk management, data governance, logging, human oversight, accuracy); *limited* (transparency duties — disclose AI, label deepfakes); *minimal*. Plus obligations for general-purpose AI models |
+| **ISO/IEC 42001** | A certifiable AI management-system standard |
+| **OWASP Top 10 for LLM Applications** | The security checklist ([LLM security](/learn/alignment-safety/deep-dive/)) |
+| **India** | The **Digital Personal Data Protection (DPDP) Act, 2023** and its Rules (consent, purpose limitation, the rights of data principals); MeitY guidelines and advisories on AI and labelling synthetic media; sector regulators such as RBI for finance |
+
+<Note>
+This is orientation, not legal advice. Regulations and their implementation timelines change, so check the current official texts and involve legal and compliance colleagues before launching anything high-impact. The [deep dive](/learn/governance/deep-dive/) has a fuller cheat sheet.
+</Note>
+
+## Risk tiering: impact × autonomy
+
+<Level l="intermediate" />
+
+Classify each use case by **impact** (what's the worst outcome?) and **autonomy** (does it act on its own?):
+
+```mermaid caption="Controls scale with impact and autonomy. Some high-impact, fully autonomous uses shouldn't be automated at all."
+flowchart TD
+  U[New AI use case] --> I{Worst-case impact?}
+  I -- low --> A1{Acts on its own?}
+  I -- high --> A2{Acts on its own?}
+  A1 -- no, suggests only --> L[Light controls<br/>e.g. drafting internal FAQs]
+  A1 -- yes --> M[Medium controls<br/>monitoring · human on the loop]
+  A2 -- no, recommends --> M2[Medium–strict controls<br/>evaluation report · human review of adverse outcomes]
+  A2 -- yes --> S[Strict controls: human approval, audits<br/>— or don't automate<br/>e.g. approving loans, changing payroll]
+```
+
+## Guardrails for agents: defence in depth
+
+<Level l="intermediate" />
+
+1. **Least privilege:** each agent gets only the tools and permissions it needs; read-only by default; scoped, short-lived credentials; a separate identity per agent.
+2. **Tool-level controls:** allow-lists (recipients, domains, tables), parameter validation, rate limits, spend limits, dry-run modes, parameterised queries (no raw SQL writes).
+3. **Input guardrails:** injection detection, personal-data redaction, content moderation; treat all retrieved and tool content as untrusted data.
+4. **Output guardrails:** schema validation, policy checks, groundedness checks, personal-data scrubbing before display or sending.
+5. **Action gating:** classify actions by risk; require human approval for high-risk ones.
+6. **Sandboxing:** run generated code in isolated containers with no network and a limited filesystem.
+7. **Budgets and a kill switch:** step, time and cost limits; the ability to halt all agents instantly.
+8. **Audit logging:** an immutable record of who, what, when and why for every action, linked to its trace.
+
+```python title="risk_gate.py"
+from enum import Enum
+
+class Risk(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+TOOL_RISK = {"search_docs": Risk.LOW, "run_readonly_sql": Risk.LOW,
+             "draft_email": Risk.MEDIUM, "send_email": Risk.HIGH, "update_salary": Risk.HIGH}
+
+def execute(tool_name, args, user, approve_fn, audit):
+    risk = TOOL_RISK.get(tool_name, Risk.HIGH)                 # unknown tools are treated as high risk
+    if not user.can_use(tool_name):                            # the user's own permissions, checked in code
+        audit.log(tool_name, args, user=user.id, status="denied")
+        return {"error": "You don't have permission for this action."}
+    if risk is Risk.HIGH and not approve_fn(tool_name, args):
+        audit.log(tool_name, args, user=user.id, status="rejected_by_human")
+        return {"error": "Action not approved by a human reviewer."}
+    result = TOOLS[tool_name](**args)
+    audit.log(tool_name, args, user=user.id, status="executed", risk=risk.name)
+    return result
+```
+
+Every tool call goes through this one function, so permissions, approvals and audit logging can't be skipped by a clever prompt.
+
+## Human oversight
+
+<Level l="intermediate" />
+
+| Mode | Human role | Use for |
+|---|---|---|
+| Human-in-the-loop | Approves each critical action before it happens | Payments, external emails, data deletion, HR decisions |
+| Human-on-the-loop | Monitors and can intervene or override | High-volume, moderate-risk automation |
+| Human-out-of-the-loop | Periodic audit only | Low-risk, reversible tasks |
+
+Designing good human-in-the-loop:
+
+- Show the reviewer **what, why** (the agent's reasoning and evidence) **and impact** — not a bare "Approve?" button.
+- **Avoid approval fatigue:** escalate only genuinely risky or low-confidence actions; batch similar approvals.
+- **Measure** reviewer agreement and override rates. If people approve 100% without looking, the oversight is theatre.
+- Give users an easy way to reach a person ("talk to a human").
+
+How to build the pause-and-resume mechanics: [approvals with LangGraph](/learn/agent-patterns/core/).
+
+## Governance in the organisation
+
+<Level l="intermediate" />
+
+- **AI inventory:** every model and agent, with its owner, purpose, data and risk tier.
+- **Model and system cards:** intended use, limitations, evaluation results, known risks.
+- **Pre-deployment review:** risk assessment, red-team report, privacy review (a DPIA), sign-off by an accountable owner.
+- **Post-deployment:** monitoring, an incident process, periodic re-assessment, a decommissioning plan.
+- **Roles:** the product owner is accountable; an AI governance board for high-risk cases; security and legal involved early.
+- **Transparency to users:** disclose AI involvement, explain decisions that affect people, label synthetic media.
+
+<Interview>
+<QA q="How would you decide what controls an AI feature needs?">
+Tier it by impact and autonomy. Low impact, suggestion-only: standard controls. High impact or autonomous actions: least privilege, human approval for consequential steps, evaluation and red-team reports, audit logs, a DPIA where personal data is involved — or don't automate it.
+</QA>
+<QA q="Human-in-the-loop vs human-on-the-loop?">
+In the loop, a person approves each critical action before it happens. On the loop, the system acts and a person monitors and can intervene. Choose by risk and reversibility.
+</QA>
+<QA q="How do you know human review is actually working?">
+Track approval, edit and rejection rates and reviewer agreement. Near-100% approval with very short review times suggests rubber-stamping; very high rejection suggests the agent isn't good enough yet.
+</QA>
+</Interview>
+
+<Takeaways>
+- Agents act, so govern by impact × autonomy.
+- Know the frameworks: NIST AI RMF, the EU AI Act tiers, OWASP LLM Top 10, ISO/IEC 42001 and India's DPDP Act.
+- Least privilege + layered guardrails + human approval for high-risk actions + audit logs, enforced in code.
+</Takeaways>

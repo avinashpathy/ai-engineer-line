@@ -1,0 +1,238 @@
+---
+summary: "The observability stack in code: metrics, logs and traces; Prometheus metrics from a FastAPI AI service (requests, latency, tokens, cost, agent steps, guardrails), PromQL for Grafana dashboards, alert rules (errors, latency, spend spikes), distributed tracing with OpenTelemetry, structured JSON logging and what not to log, online quality scoring, incident response runbooks with kill switches, and cost observability (FinOps)."
+---
+
+## The three pillars
+
+<Level l="advanced" />
+
+| Pillar | Answers | Tools |
+|---|---|---|
+| **Metrics** | How much, how fast, how often (aggregates over time) | Prometheus + Grafana, cloud monitoring |
+| **Logs** | What happened in this event (details) | Structured JSON logs → Loki, Elasticsearch, cloud logging |
+| **Traces** | Where the time went across steps and services, for one request | OpenTelemetry → Jaeger / Tempo; LLM-specific: Langfuse, LangSmith, Phoenix |
+
+```mermaid caption="One AI service, three signals. A shared request ID links a metric spike to the logs and traces that explain it."
+flowchart LR
+  APP[FastAPI AI service] -- /metrics scrape --> PROM[(Prometheus)] --> GRAF[Grafana dashboards + alerts]
+  APP -- JSON logs --> LOGS[(Loki / Elasticsearch)] --> GRAF
+  APP -- OTLP spans --> COL[OpenTelemetry Collector] --> TR[(Tempo / Jaeger · Langfuse)]
+  TR --> GRAF
+  GRAF -- page --> ONCALL[On-call engineer]
+```
+
+## Prometheus metrics from a FastAPI AI service
+
+<Level l="advanced" />
+
+```python title="metrics.py"
+import time
+from fastapi import FastAPI, Request
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
+
+app = FastAPI()
+app.mount("/metrics", make_asgi_app())                          # Prometheus scrapes this endpoint
+
+REQUESTS = Counter("ai_requests_total", "Requests", ["route", "status"])
+LATENCY = Histogram("ai_request_seconds", "Request latency", ["route"],
+                    buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32))
+TOKENS = Counter("llm_tokens_total", "LLM tokens", ["model", "direction"])      # direction: input/output
+COST = Counter("llm_cost_inr_total", "Estimated LLM cost in INR", ["model"])
+AGENT_STEPS = Histogram("agent_steps", "Steps per agent task", buckets=(1, 2, 4, 6, 8, 12, 16))
+GUARDRAIL = Counter("guardrail_triggers_total", "Guardrail triggers", ["type"])
+IN_FLIGHT = Gauge("ai_requests_in_flight", "Requests being processed")
+
+PRICE = {"large": (0.25, 1.25), "small": (0.025, 0.125)}       # INR per 1k tokens (in, out) — illustrative
+
+@app.middleware("http")
+async def observe(request: Request, call_next):
+    route = request.scope.get("route").path if request.scope.get("route") else "unmatched"
+    IN_FLIGHT.inc()
+    t0, status = time.perf_counter(), "500"
+    try:
+        resp = await call_next(request)
+        status = str(resp.status_code)
+        return resp
+    finally:
+        LATENCY.labels(route).observe(time.perf_counter() - t0)
+        REQUESTS.labels(route, status).inc()
+        IN_FLIGHT.dec()
+
+def record_llm_usage(model, tokens_in, tokens_out):
+    TOKENS.labels(model, "input").inc(tokens_in)
+    TOKENS.labels(model, "output").inc(tokens_out)
+    p_in, p_out = PRICE[model]
+    COST.labels(model).inc(tokens_in / 1000 * p_in + tokens_out / 1000 * p_out)
+```
+
+<Pitfall>
+**Watch label cardinality.** Every distinct label value creates a new time series. Label by route *template* (`/orders/{id}`), model and status — never by user ID, raw URL or question text, which can create millions of series and take Prometheus down. Per-user detail belongs in logs and traces.
+</Pitfall>
+
+### PromQL for Grafana panels
+
+```promql title="dashboard.promql"
+# p95 latency per route over 5 minutes
+histogram_quantile(0.95, sum(rate(ai_request_seconds_bucket[5m])) by (le, route))
+
+# error rate
+sum(rate(ai_requests_total{status=~"5.."}[5m])) / sum(rate(ai_requests_total[5m]))
+
+# LLM spend per hour, by model
+sum(increase(llm_cost_inr_total[1h])) by (model)
+
+# average agent steps per task
+sum(rate(agent_steps_sum[15m])) / sum(rate(agent_steps_count[15m]))
+```
+
+### Alert rules
+
+```yaml title="alerts.yml"
+groups:
+  - name: ai-service
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(ai_requests_total{status=~"5.."}[5m])) / sum(rate(ai_requests_total[5m])) > 0.02
+        for: 10m
+        labels: { severity: page }
+        annotations: { summary: "AI API error rate above 2% for 10 minutes" }
+      - alert: SlowResponses
+        expr: histogram_quantile(0.95, sum(rate(ai_request_seconds_bucket[5m])) by (le)) > 8
+        for: 15m
+        labels: { severity: ticket }
+      - alert: SpendSpike
+        expr: sum(increase(llm_cost_inr_total[1h])) > 5000
+        labels: { severity: page }
+        annotations: { summary: "LLM spend above ₹5,000 in the last hour — possible loop or abuse" }
+```
+
+Page a person only for things that need action now (errors, spend spikes, safety); send the rest to a ticket queue. Too many pages and people start ignoring them.
+
+## Distributed tracing with OpenTelemetry
+
+<Level l="advanced" />
+
+```python title="tracing.py"
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint="otel-collector:4317")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("rag-api")
+FastAPIInstrumentor.instrument_app(app)                     # an automatic span per HTTP request
+
+def answer(question):
+    with tracer.start_as_current_span("rag.answer") as span:
+        span.set_attribute("question.length", len(question))
+        with tracer.start_as_current_span("rag.retrieve") as s:
+            docs = retrieve(question)
+            s.set_attribute("retrieval.count", len(docs))
+        with tracer.start_as_current_span("llm.generate") as s:
+            out, usage = generate(question, docs)
+            s.set_attribute("gen_ai.request.model", "large")
+            s.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+            s.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+        return out
+```
+
+The `gen_ai.*` attributes follow OpenTelemetry's generative-AI semantic conventions, so LLM spans flow into general observability backends alongside the rest of your system.
+
+## Logging done right
+
+<Level l="advanced" />
+
+```python title="json_logging.py"
+import contextvars, json, logging, uuid
+
+request_id = contextvars.ContextVar("request_id", default="-")
+
+class JsonFormatter(logging.Formatter):
+    def format(self, r):
+        base = {"ts": self.formatTime(r), "level": r.levelname, "logger": r.name,
+                "msg": r.getMessage(), "request_id": request_id.get()}
+        base.update(getattr(r, "fields", {}))
+        return json.dumps(base)
+
+h = logging.StreamHandler()
+h.setFormatter(JsonFormatter())
+log = logging.getLogger("ai")
+log.addHandler(h)
+log.setLevel(logging.INFO)
+
+# per request:  request_id.set(uuid.uuid4().hex[:12])
+log.info("answered", extra={"fields": {"latency_ms": 840, "model": "large", "prompt_version": "v4",
+                                       "n_docs": 4, "refused": False}})
+```
+
+**Log for AI requests:** request ID; user or tenant (pseudonymised); model and version; prompt-template version and feature-flag values; retrieved document IDs and scores; tool calls; token counts; latency per stage; guardrail decisions; final status.
+
+**Don't log in plain text:** secrets, full personal data, or sensitive document content — or apply redaction and strict retention ([privacy engineering](/learn/alignment-safety/deep-dive/)).
+
+## Online quality monitoring
+
+<Level l="advanced" />
+
+```python title="online_quality.py"
+import random
+
+async def maybe_score(trace_id, question, answer, contexts, rate=0.02):
+    """Asynchronously LLM-judge a 2% sample of live traffic for faithfulness."""
+    if random.random() > rate:
+        return
+    score = await judge_faithfulness(question, answer, contexts)       # 1-5
+    QUALITY.labels("faithfulness").observe(score)                       # a Histogram metric
+    if score <= 2:
+        await enqueue_for_human_review(trace_id)
+```
+
+Run it **after** the response is sent (a background task or queue), so judging never slows users down. Dashboards should show quality next to latency and cost, broken down by model version, prompt version and tenant — so a regression after a release is visible within hours.
+
+## Incident response for AI systems
+
+<Level l="advanced" />
+
+AI incidents include classic outages **and behavioural failures**: harmful outputs, data leakage, an agent taking wrong actions, a sudden quality drop after a provider updates its model, runaway spend.
+
+| Runbook section | Content |
+|---|---|
+| Detection | Which alert or report; severity definitions (SEV1: data leak or unsafe action; SEV2: major quality drop or outage; SEV3: degraded) |
+| Immediate mitigation | Kill switch (disable agent actions), roll back the model or prompt version, switch to a fallback model, tighten guardrails, rate-limit |
+| Investigation | Pull traces for affected requests; identify the change (deploy, data, provider); scope the affected users |
+| Communication | Internal channel, stakeholders, customers and regulators if personal data is involved (DPDP / GDPR timelines) |
+| Resolution | Fix, then verify with the eval suite and a replay of the incident's traces |
+| Post-mortem | A blameless write-up: timeline, root cause, what detection missed, action items (new tests, alerts, guardrails) |
+
+<Tip>
+**Build the kill switches before you need them.** [Feature flags](/learn/deployment-cicd/core/) that disable specific tools, switch models, or put the agent into "suggest-only" mode — changeable at run time without a deploy — turn a scary incident into a five-minute mitigation.
+</Tip>
+
+## Cost observability (FinOps)
+
+<Level l="advanced" />
+
+- **Tag every LLM call** with feature, tenant and model, and aggregate cost per feature and per customer (unit economics).
+- **Set budgets and alerts** per environment; cap max tokens per request and steps per agent task.
+- **Review the top cost drivers weekly:** the longest prompts, the most expensive tenants, the agent tasks with the most steps.
+- **Track cost per successful task**, not just per request — a cheaper model that fails more may cost more overall ([choosing models](/learn/choosing-models/core/)).
+
+<Interview>
+<QA q="Metrics, logs or traces — which do you reach for first in an incident?">
+Metrics tell you something is wrong and when it started; traces show where time or errors happen within affected requests; logs give the details of specific events. A shared request ID lets you move between all three.
+</QA>
+<QA q="How would you catch a runaway agent loop costing money?">
+A spend metric per hour with an alert on spikes, a per-task step and token cap enforced in code, a steps-per-task histogram on the dashboard, and a kill switch to disable the agent or its tools without deploying.
+</QA>
+<QA q="What should an AI incident runbook contain?">
+Detection and severity, immediate mitigations (kill switches, rollback, fallback model), investigation with traces, communication including regulatory timelines for personal data, verification with evals and trace replay, and a blameless post-mortem with action items.
+</QA>
+</Interview>
+
+<Takeaways>
+- Metrics (Prometheus), structured logs and traces (OpenTelemetry, Langfuse) together explain AI system behaviour — keep metric labels low-cardinality.
+- Alert on errors, latency, spend spikes and quality drops; sample live traffic for automated quality scoring.
+- Prepare runbooks and kill switches for behavioural incidents, and manage cost per successful task.
+</Takeaways>

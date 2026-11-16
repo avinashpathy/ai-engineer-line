@@ -1,0 +1,462 @@
+---
+summary: "Kubernetes for AI engineers (Deployments, Services, probes, HPA, secrets, rollbacks), meaningful health checks, autoscaling on queue length with KEDA and capacity planning, load balancing (L4 vs L7, algorithms, streaming connections, LLM-aware routing across providers and GPU replicas), GPU workloads, Helm, Terraform, a cloud service map, ML pipelines with Airflow, model-registry promotion, feature stores and data versioning with DVC."
+---
+
+## Kubernetes essentials for AI engineers
+
+<Level l="advanced" />
+
+**Kubernetes** (K8s) runs containers across a cluster of machines. It keeps the desired number running, restarts failures, rolls out updates and scales with load.
+
+| Object | Purpose |
+|---|---|
+| Pod | One or more containers scheduled together (usually one) |
+| Deployment | Keeps N replicas of a pod template running; rolling updates and rollbacks |
+| Service | A stable network address + load balancing across pods |
+| Ingress / Gateway | HTTP routing from outside the cluster, TLS |
+| ConfigMap / Secret | Configuration and credentials injected as environment variables or files |
+| HorizontalPodAutoscaler (HPA) | Scales replicas on CPU, memory or custom metrics |
+| Job / CronJob | Run-to-completion tasks (batch scoring, retraining) |
+| PersistentVolumeClaim | Storage that survives pod restarts |
+| Namespace | Isolates teams or environments |
+
+```mermaid caption="Ingress routes outside traffic to a Service, which load-balances across autoscaled pods."
+flowchart TD
+  U[Users] --> I[Ingress / Gateway<br/>TLS · routing]
+  I --> S[Service rag-api<br/>stable address · load balancing]
+  S --> P1[Pod]
+  S --> P2[Pod]
+  S --> P3[Pod]
+  H[HPA<br/>2–20 replicas] -. scales .-> P1
+  CS[(ConfigMap + Secret)] -. env vars .-> P2
+```
+
+### Deploying an AI API
+
+```yaml title="deployment.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: rag-api, labels: { app: rag-api } }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: rag-api } }
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  template:
+    metadata: { labels: { app: rag-api } }
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/acme/rag-api:1.4.2          # an immutable version tag, never :latest
+          ports: [{ containerPort: 8000 }]
+          envFrom:
+            - configMapRef: { name: rag-config }
+            - secretRef: { name: rag-secrets }        # LLM API key, DB password
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+          readinessProbe: { httpGet: { path: /ready, port: 8000 }, initialDelaySeconds: 10, periodSeconds: 5 }
+          livenessProbe:  { httpGet: { path: /health, port: 8000 }, initialDelaySeconds: 30, periodSeconds: 10 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: rag-api }
+spec: { selector: { app: rag-api }, ports: [{ port: 80, targetPort: 8000 }] }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: rag-api }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: rag-api }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 65 } } }]
+```
+
+```bash title="kubectl"
+kubectl apply -f deployment.yaml
+kubectl get pods -l app=rag-api
+kubectl logs -f deploy/rag-api
+kubectl rollout status deploy/rag-api
+kubectl rollout undo deploy/rag-api          # instant rollback
+kubectl create secret generic rag-secrets --from-literal=LLM_API_KEY=... --from-literal=DB_PASSWORD=...
+```
+
+Set resource requests realistically — models loaded into memory need generous memory limits, or pods get OOM-killed. Kubernetes Secrets are only base64-encoded by default; enable encryption at rest, or sync them from a vault (Key Vault, Secrets Manager) with the External Secrets Operator.
+
+## Health checks that mean something
+
+<Level l="advanced" />
+
+- **Liveness** (`/health`): "is this process stuck?" Keep it cheap and local — if it fails, Kubernetes restarts the pod. Never check external services here, or one slow database restarts every pod at once.
+- **Readiness** (`/ready`): "can this pod serve traffic right now?" Check that models are loaded and dependencies are reachable. A failing pod is taken out of the load balancer but not restarted.
+- **Startup probes** give slow-loading model servers time before liveness checks begin.
+
+```python title="health.py"
+import asyncio
+from fastapi import FastAPI, Response
+
+app = FastAPI()
+STATE = {"model_loaded": False}
+
+@app.get("/health")
+def health():                                   # liveness: the process responds
+    return {"status": "ok"}
+
+@app.get("/ready")
+async def ready(response: Response):            # readiness: we can actually serve
+    checks = {"model_loaded": STATE["model_loaded"]}
+    try:
+        await asyncio.wait_for(db.execute("SELECT 1"), timeout=1)
+        checks["db"] = True
+    except Exception:
+        checks["db"] = False
+    try:
+        checks["redis"] = bool(await asyncio.wait_for(redis.ping(), timeout=1))
+    except Exception:
+        checks["redis"] = False
+    if not all(checks.values()):
+        response.status_code = 503
+    return checks
+```
+
+Don't make readiness depend on the LLM provider: if it's down, every pod becomes "not ready" and you serve nothing — not even a friendly error or a cached answer. Handle provider failures with fallbacks instead ([LLM APIs](/learn/llm-apis/core/)).
+
+## Autoscaling
+
+<Level l="advanced" />
+
+LLM-backed services spend most of their time **waiting** on the model, not using CPU, so CPU-based autoscaling reacts late. Better signals:
+
+| Workload | Scale on |
+|---|---|
+| API pods calling hosted LLMs | Requests in flight or concurrent streams per pod |
+| Queue workers (agents, ingestion) | Queue length or job age |
+| Self-hosted GPU model servers | Queue depth, KV-cache usage, time to first token |
+
+**KEDA** (Kubernetes Event-Driven Autoscaling) scales on these signals, including down to zero for workers:
+
+```yaml title="keda-worker.yaml"
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: agent-worker }
+spec:
+  scaleTargetRef: { name: agent-worker }
+  minReplicaCount: 0
+  maxReplicaCount: 30
+  triggers:
+    - type: redis
+      metadata: { address: redis:6379, listName: agent-jobs, listLength: "5" }   # ~5 waiting jobs per worker
+```
+
+<Example title="Worked example: how many pods?">
+Peak traffic is **50 requests per second**, and a streamed answer takes **4 seconds** on average.
+
+Requests in flight = rate × duration = 50 × 4 = **200** (Little's law).
+
+Each pod comfortably handles **40** concurrent streams, so you need 200 / 40 = **5 pods**. Add 30% headroom for spikes and a pod failing: 5 × 1.3 = 6.5, so plan for **7 pods** and let the autoscaler go higher.
+</Example>
+
+Cluster-level autoscalers (Karpenter, the cluster autoscaler) add nodes when pods can't be scheduled. Keep a warm minimum for GPU servers — loading a model can take minutes.
+
+## Load balancing
+
+<Level l="advanced" />
+
+A **load balancer** spreads requests across healthy instances, so no single one is overloaded and a failed instance stops receiving traffic.
+
+### Layer 4 vs layer 7
+
+| | Layer 4 (transport) | Layer 7 (application) |
+|---|---|---|
+| Sees | IP addresses and ports (TCP/UDP) | HTTP: paths, headers, cookies |
+| Can route by | Connection | URL path, header, user, model name |
+| Examples | AWS NLB, Azure Load Balancer, Kubernetes Services | AWS ALB, Azure Application Gateway / Front Door, GCP HTTP(S) LB, NGINX, Envoy, Kubernetes Ingress / Gateway |
+| Use for | Raw speed, non-HTTP protocols | Most web and AI APIs |
+
+### Algorithms
+
+| Algorithm | How | Good for |
+|---|---|---|
+| Round robin | Each request goes to the next instance in turn | Short, similar requests |
+| **Least connections / least outstanding requests** | Send to the instance with the fewest active requests | **LLM APIs** — request durations vary from 200 ms to 60 s |
+| Weighted | Bigger instances get proportionally more | Mixed instance sizes; canary splits |
+| Consistent hashing | The same key (user, session, prompt prefix) goes to the same instance | Cache locality |
+
+Round robin is a poor fit for LLM traffic: one instance can end up holding several 60-second streams while another sits idle. Prefer least-outstanding-requests.
+
+### Streaming and long-lived connections
+
+SSE and WebSocket responses hold a connection open for the whole answer. Configure the load balancer for it:
+
+```nginx title="nginx.conf"
+upstream rag_api {
+    least_conn;                          # fewest active connections wins
+    server api-1:8000 max_fails=3 fail_timeout=10s;
+    server api-2:8000 max_fails=3 fail_timeout=10s;
+    keepalive 64;
+}
+server {
+    listen 443 ssl;
+    location /ask/stream {
+        proxy_pass http://rag_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;             # flush tokens immediately instead of buffering them
+        proxy_read_timeout 300s;         # longer than your slowest answer
+    }
+}
+```
+
+- Raise **idle timeouts** on cloud load balancers (they often default to 60 seconds), and send a keep-alive comment every 15–30 seconds on SSE streams.
+- **Avoid sticky sessions:** keep conversation state in Redis or a checkpointer so any instance can serve the next request.
+- Use **connection draining** during deploys, so in-flight streams finish before an instance is removed.
+
+### LLM-aware load balancing
+
+Two places need routing smarter than a generic load balancer:
+
+**Across providers and deployments.** An AI gateway spreads calls across several API keys, regions or providers for the same model, respecting each one's rate limits and falling back when one fails:
+
+```python title="router.py"
+from litellm import Router
+
+router = Router(
+    model_list=[
+        {"model_name": "chat", "litellm_params": {"model": "azure/gpt-4o-mini-india", "api_base": AZURE_IN,
+                                                  "api_key": AZURE_KEY, "rpm": 600}},
+        {"model_name": "chat", "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": OPENAI_KEY, "rpm": 1000}},
+    ],
+    routing_strategy="least-busy",          # also: simple-shuffle, latency-based-routing, usage-based-routing
+    num_retries=2, allowed_fails=3, cooldown_time=30)
+
+resp = await router.acompletion(model="chat", messages=[{"role": "user", "content": "Hi"}])
+```
+
+**Across self-hosted GPU replicas.** Requests that share a long prompt prefix (the same system prompt or document) are much cheaper on the replica that already holds that prefix in its KV cache ([prefix caching](/learn/how-llms-work/deep-dive/)). **Prefix- and load-aware routers** — in the vLLM production stack, llm-d, and the Kubernetes Gateway API inference extension — route on cache hits and queue depth rather than connection counts.
+
+## GPU workloads on Kubernetes
+
+<Level l="advanced" />
+
+```yaml title="gpu-pod.yaml"
+resources:
+  limits: { nvidia.com/gpu: 1 }                     # needs the NVIDIA device plugin / GPU operator
+nodeSelector: { node.kubernetes.io/instance-type: g5.xlarge }
+tolerations: [{ key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }]
+```
+
+GPU serving tips: scale on queue length or requests in flight rather than CPU; use node autoscaling; keep a warm minimum because model loading takes minutes; use KServe or the vLLM production stack for model-serving abstractions.
+
+## Helm
+
+<Level l="advanced" />
+
+**Helm** packages Kubernetes manifests as parameterised charts — one chart, a different `values.yaml` per environment (dev, staging, prod).
+
+```bash title="helm"
+helm create rag-api                                              # scaffold
+helm install rag-api ./rag-api -f values-prod.yaml --set image.tag=1.4.2
+helm upgrade rag-api ./rag-api --set image.tag=1.4.3
+helm rollback rag-api 1
+```
+
+## Infrastructure as code with Terraform
+
+<Level l="advanced" />
+
+Declare cloud resources in code, review changes in pull requests, and recreate environments reliably.
+
+```hcl title="main.tf"
+# A container service + secret on Azure (similar resources exist for AWS and GCP)
+provider "azurerm" {
+  features {}
+}
+
+resource "azurerm_resource_group" "ai" {
+  name     = "rg-ai-prod"
+  location = "centralindia"
+}
+
+resource "azurerm_container_app_environment" "env" {
+  name                = "cae-ai-prod"
+  location            = azurerm_resource_group.ai.location
+  resource_group_name = azurerm_resource_group.ai.name
+}
+
+resource "azurerm_container_app" "rag" {
+  name                         = "rag-api"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  resource_group_name          = azurerm_resource_group.ai.name
+  revision_mode                = "Multiple"          # enables traffic splitting between revisions
+
+  secret {
+    name  = "llm-key"
+    value = var.llm_api_key
+  }
+
+  template {
+    min_replicas = 1
+    max_replicas = 10
+    container {
+      name   = "api"
+      image  = "ghcr.io/acme/rag-api:1.4.2"
+      cpu    = 1.0
+      memory = "2Gi"
+      env {
+        name        = "LLM_API_KEY"
+        secret_name = "llm-key"
+      }
+    }
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8000
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+}
+```
+
+```bash
+terraform init && terraform plan -out plan.tfplan && terraform apply plan.tfplan
+```
+
+Store Terraform state remotely with locking, keep secrets in a vault rather than variable files, and run `plan` in CI for every infrastructure change.
+
+## Cloud service map for AI workloads
+
+<Level l="intermediate" />
+
+| Need | AWS | Azure | GCP |
+|---|---|---|---|
+| Serverless containers | App Runner, ECS Fargate | Container Apps | Cloud Run |
+| Kubernetes | EKS | AKS | GKE |
+| Managed ML platform | SageMaker | Azure Machine Learning | Vertex AI |
+| Foundation-model APIs | Bedrock | Azure AI Foundry / Azure OpenAI | Vertex AI Model Garden |
+| Vector search | OpenSearch, Aurora pgvector | AI Search, Cosmos DB, PostgreSQL pgvector | Vertex Vector Search, AlloyDB |
+| Object storage | S3 | Blob Storage | Cloud Storage |
+| Workflow orchestration | Step Functions, MWAA (Airflow) | Data Factory, Logic Apps | Cloud Composer, Workflows |
+| Secrets | Secrets Manager | Key Vault | Secret Manager |
+| Monitoring | CloudWatch | Azure Monitor / App Insights | Cloud Monitoring |
+| Serverless functions | Lambda | Functions | Cloud Functions |
+
+More on the managed AI services in [Cloud GenAI & LLMOps](/learn/cloud-llmops/core/).
+
+## Orchestrating ML pipelines
+
+<Level l="advanced" />
+
+Training pipelines are DAGs (directed acyclic graphs) of steps: extract → validate → build features → train → evaluate → register → deploy.
+
+```python title="churn_dag.py"
+from datetime import datetime
+from airflow.decorators import dag, task
+
+@dag(schedule="0 2 * * 1", start_date=datetime(2026, 1, 1), catchup=False, tags=["churn"])
+def churn_training():
+    @task
+    def extract() -> str: return export_snapshot_to_parquet("s3://ml/churn/raw/")
+    @task
+    def validate(path: str) -> str: run_pandera_checks(path); return path
+    @task
+    def build_features(path: str) -> str: return compute_features(path, "s3://ml/churn/features/")
+    @task
+    def train(path: str) -> dict: return train_and_log_mlflow(path)        # run_id + metrics
+    @task
+    def gate_and_register(result: dict):
+        if result["roc_auc"] >= current_production_auc() - 0.005:
+            register_model(result["run_id"], alias="challenger")
+
+    gate_and_register(train(build_features(validate(extract()))))
+
+churn_training()
+```
+
+Alternatives: Prefect and Dagster (more Pythonic, asset-centric); Kubeflow, Vertex, SageMaker and Azure ML pipelines (a container per step on managed infrastructure); ZenML (a portable abstraction).
+
+### Model registry workflow
+
+```python title="promote.py"
+import mlflow
+from mlflow import MlflowClient
+
+client = MlflowClient()
+mv = mlflow.register_model(f"runs:/{run_id}/model", "churn-classifier")
+client.set_registered_model_alias("churn-classifier", "challenger", mv.version)
+# after shadow/canary evaluation passes:
+client.set_registered_model_alias("churn-classifier", "champion", mv.version)
+
+model = mlflow.pyfunc.load_model("models:/churn-classifier@champion")   # serving loads by alias
+```
+
+Make promotion criteria explicit and automated where possible: offline metrics against the champion, fairness checks, the latency budget, and approval by an owner for high-risk models.
+
+## Feature stores
+
+<Level l="advanced" />
+
+A **feature store** centralises feature definitions so training and serving use identical logic, and serves features at low latency.
+
+| Component | Role |
+|---|---|
+| Feature definitions | Code describing each feature, its entity (customer), source and freshness |
+| Offline store | Historical features for training, with point-in-time-correct joins |
+| Online store | Latest feature values for real-time inference (Redis, DynamoDB) |
+| Materialisation | Jobs copying fresh values from offline to online |
+| Registry | Discoverability, ownership, lineage |
+
+```python title="feast_demo.py"
+from datetime import timedelta
+from feast import Entity, FeatureStore, FeatureView, Field, FileSource
+from feast.types import Float32, Int64
+
+customer = Entity(name="customer", join_keys=["customer_id"])
+stats_src = FileSource(path="data/customer_stats.parquet", timestamp_field="event_ts")
+customer_stats = FeatureView(name="customer_stats", entities=[customer], ttl=timedelta(days=2),
+                             schema=[Field(name="orders_30d", dtype=Int64), Field(name="spend_30d", dtype=Float32)],
+                             source=stats_src)
+
+store = FeatureStore(repo_path=".")
+train_df = store.get_historical_features(entity_df=labels_df,          # customer_id + event_timestamp
+                                         features=["customer_stats:orders_30d", "customer_stats:spend_30d"]).to_df()
+online = store.get_online_features(features=["customer_stats:orders_30d", "customer_stats:spend_30d"],
+                                   entity_rows=[{"customer_id": 42}]).to_dict()
+```
+
+You need a feature store when many models share features, real-time features are required, or training–serving skew has bitten you. For a single batch model, well-tested SQL is enough.
+
+## Data versioning with DVC
+
+<Level l="advanced" />
+
+```bash title="dvc"
+dvc init
+dvc add data/raw/telco.csv                    # creates telco.csv.dvc (tracked by Git); data goes to the cache
+dvc remote add -d storage s3://ml-artifacts/dvc
+dvc push                                      # upload the data
+git add data/raw/telco.csv.dvc .gitignore && git commit -m "data v1"
+# later: git checkout <old-commit> && dvc checkout  -> the exact old dataset is restored
+```
+
+DVC pipelines (`dvc.yaml`) also define reproducible stages with dependencies, so `dvc repro` re-runs only what changed.
+
+<Interview>
+<QA q="Liveness vs readiness probes?">
+Liveness asks whether the process is stuck; failing it restarts the pod, so keep it cheap and local. Readiness asks whether the pod can serve traffic now — models loaded, dependencies reachable; failing it removes the pod from the load balancer without restarting it.
+</QA>
+<QA q="How would you load-balance an LLM streaming API?">
+A layer-7 load balancer with least-outstanding-requests (not round robin), buffering off, idle timeouts longer than the slowest answer, keep-alive pings on SSE, connection draining on deploys, and no sticky sessions — state lives in Redis. Across providers, an AI gateway; across GPU replicas, a prefix- and load-aware router.
+</QA>
+<QA q="How should an agent worker pool autoscale?">
+On queue length or job age, not CPU — for example KEDA with a target number of waiting jobs per worker, scaling to zero when idle, with node autoscaling underneath.
+</QA>
+</Interview>
+
+<Takeaways>
+- Kubernetes = Deployments + Services + probes + autoscaling; Helm templatises it; Terraform codifies cloud infrastructure.
+- Scale LLM services on in-flight requests or queue length, and load-balance with least-outstanding-requests and streaming-friendly settings.
+- Orchestrate retraining as a DAG with an automated promotion gate; use feature stores and DVC when sharing features and versioning data matter.
+</Takeaways>

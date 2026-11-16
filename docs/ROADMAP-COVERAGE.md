@@ -2,7 +2,7 @@
 
 This file checks the site against every topic in the *AI Engineer Roadmap* (Learnvora, November 2026 edition): 8 areas × 20 topics. Topic names are used only as a checklist; all explanations on the site are original or adapted from the author's own notes.
 
-**Status:** 147 published · 11 planned (in the notes; arrives when that station is written) · 2 gaps (not in the notes; must be written new)
+**Status: all 160 topics are taught in published lessons.** New topics added to the roadmap later should be added here, marked 🕒 until a lesson covers them.
 
 | Area | ✅ Published | 🕒 Planned | ⚠️ Gap |
 |---|---|---|---|
@@ -12,7 +12,7 @@ This file checks the site against every topic in the *AI Engineer Roadmap* (Lear
 | Evals | 20 | 0 | 0 |
 | AI System Design | 20 | 0 | 0 |
 | AI Security | 20 | 0 | 0 |
-| Deployment | 7 | 11 | 2 |
+| Deployment | 20 | 0 | 0 |
 | Backend | 20 | 0 | 0 |
 
 Legend: ✅ taught in a published lesson · 🕒 covered by a station still to be written (often already used in a project guide) · ⚠️ needs new content beyond the notes.
@@ -113,8 +113,8 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 15 | Tracing | ✅ | [evaluation/core](/learn/evaluation/core/), [rag-orchestration/core](/learn/rag-orchestration/core/) |
 | 16 | Langfuse | ✅ | [evaluation/core](/learn/evaluation/core/) |
 | 17 | OpenTelemetry for LLMs | ✅ | [evaluation/core](/learn/evaluation/core/) |
-| 18 | P95 latency | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/), [choosing-models/core](/learn/choosing-models/core/) |
-| 19 | Cost per request | ✅ | [llm-apis/core](/learn/llm-apis/core/), [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/) |
+| 18 | P95 latency | ✅ | [observability/core](/learn/observability/core/), [observability/deep-dive](/learn/observability/deep-dive/) |
+| 19 | Cost per request | ✅ | [observability/deep-dive](/learn/observability/deep-dive/), [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/) |
 | 20 | User feedback loops | ✅ | [full-stack-apps/core](/learn/full-stack-apps/core/) |
 
 ## AI System Design
@@ -171,26 +171,26 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 
 | # | Topic | Status | Where |
 |---|---|---|---|
-| 01 | Docker | 🕒 | Deployment & CI/CD station · used in every project |
-| 02 | Docker Compose | ✅ | [full-stack-apps/core](/learn/full-stack-apps/core/) |
-| 03 | Kubernetes basics | 🕒 | Deployment & CI/CD deep dive |
-| 04 | CI/CD pipelines | 🕒 | Deployment & CI/CD station |
-| 05 | GitHub Actions | 🕒 | Deployment & CI/CD station · used in Projects 06, 07 |
-| 06 | Eval gates in CI | 🕒 | Deployment & CI/CD station · used in Project 07 |
+| 01 | Docker | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/) |
+| 02 | Docker Compose | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/), [full-stack-apps/core](/learn/full-stack-apps/core/) |
+| 03 | Kubernetes basics | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/) |
+| 04 | CI/CD pipelines | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/) |
+| 05 | GitHub Actions | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/) |
+| 06 | Eval gates in CI | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/), [evaluation/deep-dive](/learn/evaluation/deep-dive/) |
 | 07 | Environment configs | ✅ | [start-here/setup](/learn/start-here/setup/) |
-| 08 | Infrastructure as code | 🕒 | Deployment & CI/CD deep dive |
-| 09 | Serverless functions | 🕒 | Cloud GenAI & LLMOps station |
-| 10 | GPU instances | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/); more in Cloud GenAI & LLMOps |
+| 08 | Infrastructure as code | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/), [cloud-llmops/core](/learn/cloud-llmops/core/) |
+| 09 | Serverless functions | ✅ | [cloud-llmops/core](/learn/cloud-llmops/core/) |
+| 10 | GPU instances | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/), [cloud-llmops/core](/learn/cloud-llmops/core/) |
 | 11 | Ollama for local models | ✅ | [how-llms-work/deep-dive](/learn/how-llms-work/deep-dive/) |
-| 12 | Autoscaling | 🕒 | Deployment & CI/CD deep dive |
-| 13 | Load balancing | ⚠️ | Thin in the notes — to be expanded in the Deployment & CI/CD deep dive |
-| 14 | Canary releases | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) (gradual rollout); more in Deployment & CI/CD |
-| 15 | Feature flags | ⚠️ | Not in the notes yet — to be written for Deployment & CI/CD |
-| 16 | Prompt versioning | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) |
-| 17 | Model versioning | ✅ | [choosing-models/core](/learn/choosing-models/core/) |
-| 18 | Health checks | 🕒 | Deployment & CI/CD station · used in Project 07 |
-| 19 | Alerts and dashboards | 🕒 | Observability station |
-| 20 | Rollbacks | 🕒 | Deployment & CI/CD station |
+| 12 | Autoscaling | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/) |
+| 13 | Load balancing | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/) |
+| 14 | Canary releases | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/), [cloud-llmops/core](/learn/cloud-llmops/core/) |
+| 15 | Feature flags | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/) |
+| 16 | Prompt versioning | ✅ | [cloud-llmops/core](/learn/cloud-llmops/core/), [prompt-engineering/core](/learn/prompt-engineering/core/) |
+| 17 | Model versioning | ✅ | [cloud-llmops/core](/learn/cloud-llmops/core/), [choosing-models/core](/learn/choosing-models/core/) |
+| 18 | Health checks | ✅ | [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/) |
+| 19 | Alerts and dashboards | ✅ | [observability/deep-dive](/learn/observability/deep-dive/), [observability/core](/learn/observability/core/) |
+| 20 | Rollbacks | ✅ | [deployment-cicd/core](/learn/deployment-cicd/core/), [deployment-cicd/deep-dive](/learn/deployment-cicd/deep-dive/) |
 
 ## Backend
 

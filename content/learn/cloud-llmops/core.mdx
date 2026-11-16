@@ -1,0 +1,330 @@
+---
+summary: "Reference architectures for GenAI on AWS and Azure (streaming APIs on containers, managed models, hybrid search, queues, keyless identity), infrastructure as code with AWS CDK, Bedrock streaming, serverless functions for async work, self-hosting open models with vLLM and the API-vs-GPU break-even, an LLM gateway with LiteLLM, and LLMOps: the release process, the model-upgrade playbook, release manifests, FinOps and a production-readiness checklist."
+---
+
+## From generic MLOps to concrete clouds
+
+<Level l="advanced" />
+
+This lesson turns the general material in [Deployment & CI/CD](/learn/deployment-cicd/core/) into concrete reference architectures for AWS and Azure. It also covers self-hosting open models, LLM gateways, and the LLMOps practices that keep GenAI products healthy after launch.
+
+## AWS reference architecture
+
+<Level l="advanced" />
+
+```mermaid caption="A streaming RAG chat service on AWS. The task's IAM role reaches Bedrock without any static keys."
+flowchart TD
+  U[Users] --> E[Route 53 · CloudFront · WAF]
+  E --> ALB[Application Load Balancer<br/>idle timeout 300 s]
+  ALB --> API[ECS Fargate service<br/>FastAPI + SSE · IAM task role]
+  API --> BR[Amazon Bedrock<br/>LLMs · embeddings · Guardrails]
+  API --> VS[(OpenSearch Serverless or<br/>Aurora PostgreSQL + pgvector)]
+  API --> RC[(ElastiCache Redis<br/>sessions · rate limits · cache)]
+  API --> DB[(DynamoDB / Aurora<br/>conversations · feedback)]
+  API --> Q[[SQS]] --> W[Fargate or Lambda workers<br/>long agent jobs]
+  S3[(S3 documents)] -- ObjectCreated --> Q2[[SQS]] --> ING[Ingestion worker] --> VS
+```
+
+| Component | AWS choice | Notes |
+|---|---|---|
+| Chat API with streaming | ECS Fargate behind an ALB | Handles long-lived SSE connections; Lambda suits short request/response and async jobs |
+| Async / background jobs | SQS + Lambda or Fargate workers | Ingestion, batch evaluation, report generation |
+| Models | Bedrock (Claude, Llama, Mistral, Amazon Nova, Cohere embeddings) | IAM auth, VPC endpoints, regional availability |
+| Vector search | OpenSearch (hybrid), Aurora pgvector, Bedrock Knowledge Bases | Choose by scale and appetite for operations |
+| Secrets | Secrets Manager / SSM Parameter Store | Injected into task definitions |
+| Observability | CloudWatch + OpenTelemetry → X-Ray or a third party | Add LLM tracing (Langfuse / LangSmith) |
+| Guardrails | Bedrock Guardrails + your own checks | Content filters, personal-data redaction, denied topics |
+
+### Infrastructure as code with AWS CDK
+
+```python title="app.py"
+from aws_cdk import App, Stack, aws_ecs as ecs, aws_ecs_patterns as patterns, aws_iam as iam
+from constructs import Construct
+
+class ChatStack(Stack):
+    def __init__(self, scope: Construct, id: str, **kw):
+        super().__init__(scope, id, **kw)
+        svc = patterns.ApplicationLoadBalancedFargateService(
+            self, "ChatApi", cpu=1024, memory_limit_mib=2048, desired_count=2,
+            task_image_options=patterns.ApplicationLoadBalancedTaskImageOptions(
+                image=ecs.ContainerImage.from_asset("./backend"), container_port=8000,
+                environment={"CHAT_MODEL": "<bedrock-model-id>", "AWS_REGION": "ap-south-1"}),
+            public_load_balancer=True)
+        svc.target_group.configure_health_check(path="/health")
+        svc.load_balancer.set_attribute("idle_timeout.timeout_seconds", "300")      # long streams
+        svc.task_definition.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            resources=["arn:aws:bedrock:ap-south-1::foundation-model/*"]))          # scope it down
+        scaling = svc.service.auto_scale_task_count(min_capacity=2, max_capacity=20)
+        scaling.scale_on_request_count("Rps", requests_per_target=50, target_group=svc.target_group)
+
+app = App()
+ChatStack(app, "ChatStack")
+app.synth()
+```
+
+```bash
+cdk bootstrap && cdk deploy
+```
+
+### Streaming from Bedrock
+
+```python title="bedrock_stream.py"
+import boto3
+
+brt = boto3.client("bedrock-runtime", region_name="ap-south-1")
+
+def stream_answer(system, messages, model_id):
+    resp = brt.converse_stream(
+        modelId=model_id, system=[{"text": system}],
+        messages=[{"role": m["role"], "content": [{"text": m["content"]}]} for m in messages],
+        inferenceConfig={"maxTokens": 1200, "temperature": 0.2})
+    for event in resp["stream"]:
+        if "contentBlockDelta" in event:
+            yield event["contentBlockDelta"]["delta"].get("text", "")
+        elif "metadata" in event:
+            usage = event["metadata"]["usage"]            # inputTokens / outputTokens for cost tracking
+            record_llm_usage(model_id, usage["inputTokens"], usage["outputTokens"])
+```
+
+The Converse API has the same shape for every Bedrock model, so switching models is a configuration change.
+
+### Serverless functions for async work
+
+**Serverless functions** (AWS Lambda, Azure Functions, Google Cloud Functions) run your code in response to events and bill per invocation. They're a poor fit for long streaming chats (time limits, cold starts), but ideal for short, bursty, event-driven work: processing an uploaded document, embedding a batch, sending a notification.
+
+```python title="lambda_ingest.py"
+import json
+
+def handler(event, context):
+    """Triggered by SQS messages that S3 sends when a document is uploaded."""
+    failures = []
+    for record in event["Records"]:
+        try:
+            body = json.loads(record["body"])
+            for s3_event in body.get("Records", []):
+                key = s3_event["s3"]["object"]["key"]
+                ingest_document(bucket=s3_event["s3"]["bucket"]["name"], key=key)   # idempotent: hash-based
+        except Exception:
+            failures.append({"itemIdentifier": record["messageId"]})             # retry only the failures
+    return {"batchItemFailures": failures}
+```
+
+Keep each invocation short and **idempotent** (the same message can arrive twice), set a dead-letter queue, and report partial batch failures so only failed messages are retried ([production ingestion](/learn/production-rag/core/)).
+
+## Azure reference architecture
+
+<Level l="advanced" />
+
+```mermaid caption="The same service on Azure. A managed identity with Entra ID roles replaces every API key."
+flowchart TD
+  U[Users] --> FD[Front Door / Application Gateway · WAF]
+  FD --> ACA[Azure Container Apps<br/>FastAPI · managed identity]
+  ACA --> AOAI[Azure OpenAI / AI Foundry models]
+  ACA --> AIS[(Azure AI Search<br/>hybrid + semantic ranker)]
+  ACA --> RED[(Azure Cache for Redis)]
+  ACA --> COS[(Cosmos DB / PostgreSQL)]
+  ACA --> SB[[Service Bus]] --> JOBS[Container Apps jobs<br/>ingestion · batch]
+  BLOB[(Blob Storage / SharePoint)] --> AIS
+  ACA -. secrets · telemetry · safety .-> OPS[Key Vault · Application Insights · AI Content Safety]
+```
+
+| AWS | Azure equivalent |
+|---|---|
+| ECS Fargate | Azure Container Apps |
+| Lambda | Azure Functions |
+| Bedrock | Azure OpenAI / Azure AI Foundry |
+| OpenSearch / Bedrock Knowledge Bases | Azure AI Search |
+| SQS | Service Bus / Storage Queues |
+| Secrets Manager | Key Vault |
+| CloudWatch / X-Ray | Azure Monitor / Application Insights |
+| IAM roles | Managed identities + Entra ID RBAC |
+| Bedrock Guardrails | Azure AI Content Safety, Prompt Shields |
+
+### Keyless authentication with managed identity
+
+```python title="azure_keyless.py"
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import AzureOpenAI
+
+token_provider = get_bearer_token_provider(DefaultAzureCredential(),
+                                           "https://cognitiveservices.azure.com/.default")
+client = AzureOpenAI(azure_endpoint="https://<resource>.openai.azure.com",
+                     azure_ad_token_provider=token_provider,
+                     api_version="<current GA api-version>")
+# Works locally after `az login` and in Container Apps through the app's managed identity — no secrets to leak.
+```
+
+```bash title="deploy.sh"
+az containerapp up --name chat-api --resource-group rg-genai --location centralindia \
+  --source ./backend --ingress external --target-port 8000 \
+  --env-vars CHAT_DEPLOYMENT=<deployment-name> AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+az containerapp identity assign --name chat-api --resource-group rg-genai --system-assigned
+# then grant the identity the "Cognitive Services OpenAI User" role on the Azure OpenAI resource
+```
+
+## Self-hosting open models
+
+<Level l="advanced" />
+
+Self-host when data must stay inside your network, when volume makes per-token pricing expensive, or when you need a fine-tuned open model ([fine-tuning](/learn/fine-tuning/core/), [serving with vLLM](/learn/how-llms-work/deep-dive/)).
+
+```yaml title="vllm.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: vllm-qwen }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: vllm-qwen } }
+  template:
+    metadata: { labels: { app: vllm-qwen } }
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:<pinned-version>         # never :latest in production
+          args: ["--model", "Qwen/Qwen2.5-7B-Instruct", "--max-model-len", "16384",
+                 "--gpu-memory-utilization", "0.9", "--enable-prefix-caching"]
+          ports: [{ containerPort: 8000 }]
+          resources: { limits: { nvidia.com/gpu: 1 } }
+          readinessProbe: { httpGet: { path: /health, port: 8000 }, initialDelaySeconds: 120, periodSeconds: 10 }
+          volumeMounts: [{ name: hf-cache, mountPath: /root/.cache/huggingface }]
+      volumes: [{ name: hf-cache, persistentVolumeClaim: { claimName: hf-cache } }]
+```
+
+<Example title="Worked example: API vs self-hosted break-even">
+A GPU instance serving a 7–8B model at about **1,500 output tokens/s** (with batching) costs about **$1.20/hour**, or about **$880/month** running 24×7.
+
+At **40% utilisation** it produces 1,500 × 0.4 × 3,600 × 730 ≈ **1.6 billion tokens a month**. A small API model at $0.60 per million output tokens would cost about **$950** for the same tokens.
+
+So self-hosting only wins at high, steady utilisation — and that's before engineering and on-call time. For spiky or low traffic, APIs are cheaper. Redo this with your own traffic and current prices.
+</Example>
+
+## An LLM gateway with LiteLLM
+
+<Level l="advanced" />
+
+A gateway centralises keys, routing, fallbacks, budgets, caching and logging for every team and service.
+
+```yaml title="litellm_config.yaml"
+model_list:
+  - model_name: chat-default
+    litellm_params: { model: anthropic/claude-sonnet-4-5, api_key: os.environ/ANTHROPIC_API_KEY }
+  - model_name: chat-default
+    litellm_params: { model: bedrock/<bedrock-model-id>, aws_region_name: ap-south-1 }
+  - model_name: chat-cheap
+    litellm_params: { model: openai/gpt-4o-mini, api_key: os.environ/OPENAI_API_KEY }
+  - model_name: local-qwen
+    litellm_params: { model: openai/Qwen/Qwen2.5-7B-Instruct, api_base: http://vllm-qwen:8000/v1 }
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  fallbacks: [{ chat-default: [chat-cheap] }]
+litellm_settings:
+  cache: true
+  cache_params: { type: redis, host: redis, port: 6379 }
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+```
+
+```bash
+docker run -p 4000:4000 -v $(pwd)/litellm_config.yaml:/app/config.yaml \
+  -e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e LITELLM_MASTER_KEY \
+  ghcr.io/berriai/litellm:<pinned-version> --config /app/config.yaml
+# Apps call http://gateway:4000/v1/chat/completions with model="chat-default" and a per-team virtual key
+```
+
+Gateway features to use: **virtual keys** per team or app, budgets and rate limits, spend tracking, fallbacks on provider errors, caching, logging callbacks into your observability stack, and a single place to swap models ([load balancing across providers](/learn/deployment-cicd/deep-dive/)).
+
+## LLMOps practices
+
+<Level l="advanced" />
+
+### The release process for prompt, model and retrieval changes
+
+```mermaid caption="Every behaviour change — prompt, model, chunking or tool — follows the same gated path to production."
+flowchart TD
+  C[Change: prompt · model · chunking · tool] --> PR[Pull request with eval diff]
+  PR --> G{Offline eval gate<br/>golden + adversarial}
+  G -- fail --> C
+  G -- pass --> ST[Staging + smoke tests]
+  ST --> SH[Shadow: new version answers silently, compare]
+  SH --> CA[Canary 5–10% behind a flag]
+  CA --> MON{Quality, latency, cost,<br/>guardrail rates OK?}
+  MON -- yes --> FULL[Ramp to 100%]
+  MON -- no --> RB[Roll back]
+```
+
+### The model-upgrade playbook
+
+Providers release new model versions and retire old ones regularly. When an update arrives:
+
+1. Run the full evaluation suite on the new model with the current prompts.
+2. Compare quality, refusal behaviour, latency, output length and **cost per successful task**.
+3. Fix regressions by adjusting prompts — a prompt tuned for one model may need changes for another.
+4. Shadow-test on real traffic, then canary.
+5. **Pin model versions explicitly** in config. Never rely on a moving alias in production without testing.
+6. Track the deprecation dates of every model you depend on.
+
+### Version everything together
+
+| Artefact | Why |
+|---|---|
+| Prompt templates | Behaviour |
+| Model identifier and parameters | Behaviour, cost |
+| Tool schemas | Agent behaviour |
+| Retrieval config (chunking, embedding model, k, re-ranker) | Answer quality |
+| Guardrail config and thresholds | Safety |
+| Evaluation datasets and results | Evidence for each release |
+
+A **release manifest** that pins all of these, logged with every request, makes any answer reproducible and explainable:
+
+```yaml title="release-2026-11-16.yaml"
+app_version: 2.7.0
+chat_model: { id: claude-sonnet-4-5, temperature: 0.2, max_tokens: 1200 }
+router_model: { id: claude-haiku-4-5 }
+prompts: { system: assistant/v7, rewrite: rewrite/v3, judge: judge/v2 }
+retrieval: { embedder: bge-base-en-v1.5, chunk_size: 600, overlap: 80, k: 20, reranker: bge-reranker-base, top_n: 5 }
+guardrails: { injection_classifier: v2, pii_redaction: presidio-2.2, output_moderation: on }
+eval: { golden: golden_v12, adversarial: redteam_v5, pass_rate: 0.93, faithfulness: 0.91 }
+```
+
+### Cost management (FinOps for LLMs)
+
+- **Dashboards:** cost per day, per feature, per tenant and per successful task; percentiles of tokens per request.
+- **Budgets and alerts** per environment and team (gateway virtual keys).
+- **A weekly review** of the ten most expensive request types — then apply caching, routing, shorter prompts or fine-tuned small models.
+- **Unit economics:** compare the cost per resolved ticket with the human cost per ticket. That's the business case for the product.
+
+## Production-readiness checklist
+
+<Level l="advanced" />
+
+- Secrets in a vault; keyless auth (IAM roles, managed identity) wherever possible.
+- Timeouts, retries and fallbacks; idle timeouts sized for streaming.
+- Per-user rate limits and token budgets.
+- Input and output guardrails; injection defences; personal-data handling.
+- Tracing of every LLM and tool call, with prompt and model versions.
+- Dashboards: latency (time to first token, total), errors, tokens, cost, quality samples, guardrail triggers.
+- An evaluation gate in CI; shadow and canary rollout; one-click rollback.
+- Data retention configured for logs, prompts and vector stores.
+- A load test at expected peak (concurrent streams).
+- A runbook and kill switches for incidents.
+- A system card and governance sign-off for the risk tier ([governance toolkit](/learn/governance/deep-dive/)).
+
+<Interview>
+<QA q="How would you deploy a streaming LLM chat API on AWS?">
+Containerise FastAPI and run it on ECS Fargate behind an ALB with long idle timeouts; call Bedrock with an IAM task role; Redis for sessions and rate limits; a vector store for retrieval; SQS workers for ingestion; Secrets Manager; CloudWatch and OpenTelemetry tracing; autoscale on request count or concurrency.
+</QA>
+<QA q="How do you safely upgrade the underlying LLM?">
+Run offline evals on golden and adversarial sets, compare cost and latency, adjust prompts, shadow-test, canary with monitoring, and keep the pinned previous version for rollback.
+</QA>
+<QA q="When is self-hosting an open model worth it?">
+When data must stay in your network, when you need a fine-tuned open model, or when traffic is high and steady enough that a well-utilised GPU beats per-token prices — after counting engineering and on-call costs.
+</QA>
+</Interview>
+
+<Takeaways>
+- AWS and Azure offer equivalent building blocks: containers for streaming APIs, managed models, hybrid search, queues, secrets and monitoring. Prefer keyless identity; use serverless functions for short event-driven jobs.
+- Self-host open models with vLLM only when privacy or steady high volume justifies the operations cost; put a gateway in front of every model.
+- LLMOps means versioning prompts, models, retrieval and guardrails together, gating releases on evals, rolling out gradually, and managing cost per successful task.
+</Takeaways>
