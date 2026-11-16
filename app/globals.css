@@ -355,3 +355,6 @@ details.qa > div p{margin:.4em 0}
 .pal-list .mono{color:var(--muted);display:block}
 .pal-empty{padding:14px 16px;color:var(--muted)}
 .pal-hint{display:flex;gap:16px;padding:8px 16px;border-top:2px solid var(--ink);color:var(--muted);background:var(--map)}
+details.qa.solution{border:1px solid var(--rule);border-radius:10px;padding:10px 14px;margin:12px 0 22px}
+details.qa.solution summary{font-size:.92em}
+details.qa.solution[open]{background:color-mix(in srgb,var(--rule) 12%,transparent)}

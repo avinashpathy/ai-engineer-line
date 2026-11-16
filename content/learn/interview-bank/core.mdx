@@ -1,0 +1,510 @@
+---
+summary: "120 GenAI interview questions with crisp model answers across eight areas — LLM fundamentals, prompting and context, fine-tuning and alignment, RAG and vector search, agents and MCP, evaluation, production and cloud, and security and governance — plus newer topics, coding-round tasks to practise and behavioural stories to prepare."
+---
+
+## How to use this bank
+
+<Level l="beginner" />
+
+Answer each question **aloud in 30–90 seconds** before opening the model answer. Strong answers follow the same shape:
+
+1. **Define** the concept in one sentence.
+2. Say **why it matters**.
+3. Give a **concrete example** — ideally from your own projects.
+4. Mention a **trade-off** or limitation.
+
+The model answers below are deliberately short — they're the skeleton. Add your own example to each one. Every section links to the lessons that go deeper.
+
+## LLM fundamentals
+
+<Level l="beginner" />
+
+Go deeper: [How LLMs work](/learn/how-llms-work/core/), [transformers](/learn/transformers/attention-and-transformer/).
+
+<Interview>
+<QA q="1. What is a large language model?">
+A Transformer (usually decoder-only) with billions of parameters, trained on large text corpora to predict the next token, then instruction-tuned and preference-aligned to follow instructions.
+</QA>
+<QA q="2. Explain tokens and why they matter.">
+Sub-word units the model reads and writes (about 0.75 English words each). Cost, latency and context limits are all measured in tokens, and tokenisation explains odd behaviour with numbers, spelling and non-English text.
+</QA>
+<QA q="3. What is the context window?">
+The maximum number of tokens (input + output) per request. Larger windows allow more context but cost more, add latency, and models may under-use information in the middle.
+</QA>
+<QA q="4. Walk me through self-attention.">
+Each token produces query, key and value vectors. Attention weights are the softmax of QKᵀ/√d, and the output is a weighted sum of values. Multi-head attention learns several relationship types in parallel.
+</QA>
+<QA q="5. Why are decoder-only models dominant for generation?">
+Causal next-token training scales simply on unlimited text, produces general capabilities, and generation is natural for autoregressive decoders.
+</QA>
+<QA q="6. What is the KV cache?">
+Stored keys and values of previous tokens, so each new token computes attention only for itself. It makes generation fast but consumes GPU memory that grows with context and batch size.
+</QA>
+<QA q="7. Prefill vs decode?">
+Prefill processes the prompt in parallel (compute-bound; determines time to first token). Decode generates one token at a time (memory-bandwidth-bound; determines tokens per second).
+</QA>
+<QA q="8. Temperature, top-k, top-p?">
+Temperature rescales logits (lower is more deterministic). Top-k samples from the k most likely tokens. Top-p samples from the smallest set whose probability reaches p.
+</QA>
+<QA q="9. Why do LLMs hallucinate?">
+They are trained to produce plausible continuations, not verified facts. With weak or missing knowledge they still generate fluent text, and decoding randomness adds variance.
+</QA>
+<QA q="10. What are embeddings?">
+Dense vectors where semantic similarity corresponds to geometric closeness. They are used for search, clustering, classification and RAG retrieval.
+</QA>
+<QA q="11. Encoder vs decoder vs encoder–decoder?">
+Encoders (BERT) are bidirectional, for understanding and embeddings. Decoders (GPT, Llama) are causal, for generation. Encoder–decoders (T5, Whisper) handle sequence-to-sequence tasks like translation and ASR.
+</QA>
+<QA q="12. What is RoPE and why is it used?">
+Rotary position embeddings rotate Q/K by position-dependent angles, so attention depends on relative position. They extrapolate better to long contexts.
+</QA>
+<QA q="13. What is Mixture of Experts?">
+Many expert feed-forward networks plus a router that activates only a few per token. This gives large capacity at lower compute per token, at the cost of more memory and serving complexity.
+</QA>
+<QA q="14. What are scaling laws?">
+Loss falls predictably with parameters, data and compute. Chinchilla showed many models were under-trained for their size (compute-optimal is about 20 tokens per parameter).
+</QA>
+<QA q="15. What are reasoning models?">
+Models trained, often with RL on verifiable tasks, to produce extended reasoning before answering. They are better at maths, code and planning, but use more tokens and time.
+</QA>
+<QA q="16. What does instruction tuning do?">
+Supervised fine-tuning on instruction→response pairs so a base model follows instructions and chat formats.
+</QA>
+<QA q="17. What is perplexity?">
+The exponentiated average negative log-likelihood per token; lower means the model predicts the text better.
+</QA>
+<QA q="18. Open-weight vs API models?">
+Open-weight models give control, privacy and customisation, at the cost of infrastructure and operations. APIs give frontier quality and zero infrastructure, but per-token cost and data leaving your boundary (check the terms).
+</QA>
+<QA q="19. What is quantisation?">
+Storing weights in fewer bits (int8, 4-bit) to cut memory and speed up inference with a small quality loss. GPTQ, AWQ, GGUF and NF4 are common formats.
+</QA>
+<QA q="20. What is speculative decoding?">
+A small draft model proposes tokens that the large model verifies in one pass. It speeds up generation without changing the output distribution.
+</QA>
+</Interview>
+
+## Prompting and context engineering
+
+<Level l="intermediate" />
+
+Go deeper: [Prompt engineering](/learn/prompt-engineering/core/), [context engineering](/learn/context-engineering/core/).
+
+<Interview>
+<QA q="21. What makes a good system prompt?">
+Role, prioritised goals, explicit rules, behaviour when unsure, output format, and examples, structured with headings or tags.
+</QA>
+<QA q="22. Zero-shot vs few-shot?">
+Zero-shot gives instructions only. Few-shot adds examples to show format and edge cases, which improves consistency, especially for structured outputs.
+</QA>
+<QA q="23. What is chain-of-thought prompting?">
+Asking the model to reason step by step before answering. It improves multi-step reasoning, at the cost of extra tokens.
+</QA>
+<QA q="24. How do you get reliable JSON?">
+Native structured outputs or forced tool calls with a schema, validation with Pydantic, and retrying with the error message.
+</QA>
+<QA q="25. What is dynamic few-shot?">
+Retrieving the most similar examples from a library per request using embeddings, instead of static examples.
+</QA>
+<QA q="26. What is context engineering?">
+Deciding what goes into the context per call (instructions, history, retrieved data, tool results, memory) and in what order, within token budgets.
+</QA>
+<QA q="27. How do you handle long conversations?">
+Recent turns verbatim, a rolling summary of older turns, structured state for critical facts, and retrieval over history.
+</QA>
+<QA q="28. What is prompt caching?">
+Reuse of a processed identical prompt prefix, giving discounted input cost and lower latency. Put stable content first.
+</QA>
+<QA q="29. How do you version and test prompts?">
+Prompts live in files or a registry with versions; changes run against a test suite (promptfoo/evals); the version is logged per request; rollouts are gradual.
+</QA>
+<QA q="30. “Lost in the middle” — what and how to mitigate?">
+Models use information in the middle of long contexts less reliably. Retrieve less but better, put key facts at the start or end, and re-rank.
+</QA>
+<QA q="31. How do you reduce token usage?">
+Shorter prompts, caching, fewer re-ranked chunks, compact data formats, output limits, summarised history, and small models for sub-steps.
+</QA>
+<QA q="32. What are prompt anti-patterns?">
+Vague “don't hallucinate”, contradictory rules, instructions after long documents, asking for exact arithmetic, free-text plus JSON mixed together.
+</QA>
+<QA q="33. How do you write a good LLM-as-judge prompt?">
+A specific rubric, binary or narrow scales, reasoning before the score, structured output, validation against human labels, and swapped order for pairwise comparisons.
+</QA>
+<QA q="34. When should you NOT use an LLM?">
+Deterministic rules, exact arithmetic, simple lookups, strict latency or cost limits that a classifier or SQL query meets better.
+</QA>
+<QA q="35. How do you make prompts multilingual?">
+Instruct the model to reply in the user's language, test per language, use multilingual embeddings for retrieval, and watch tokenisation costs for Indic scripts.
+</QA>
+</Interview>
+
+## Fine-tuning and alignment
+
+<Level l="intermediate" />
+
+Go deeper: [Fine-tuning](/learn/fine-tuning/core/), [alignment](/learn/alignment-safety/core/).
+
+<Interview>
+<QA q="36. When fine-tune vs RAG vs prompt?">
+Prompt first. RAG for knowledge that is private, changing or needs citations. Fine-tune for behaviour, format, style, latency or cost (distilling into a small model).
+</QA>
+<QA q="37. What is LoRA?">
+Freeze the weights W and learn a low-rank update BA (rank r ≪ d) in selected layers. It trains under 1% of parameters, adapters are small, and they can be merged for zero inference overhead.
+</QA>
+<QA q="38. What is QLoRA?">
+LoRA on a 4-bit NF4-quantised frozen base, with double quantisation and paged optimisers, so 7–8B models fine-tune on one consumer GPU.
+</QA>
+<QA q="39. Key LoRA hyperparameters?">
+Rank r, alpha, target modules, learning rate (about 1e-4 to 2e-4), epochs (1–3), effective batch size, and sequence length.
+</QA>
+<QA q="40. How much data for fine-tuning?">
+Hundreds to a few thousand high-quality examples for format and style; more for new skills. Quality and coverage beat volume.
+</QA>
+<QA q="41. How do you prepare fine-tuning data?">
+Clean, remove PII, filter quality, deduplicate, balance coverage, apply the model's chat template, train on completions only, and keep a held-out test set.
+</QA>
+<QA q="42. What is catastrophic forgetting?">
+Loss of general abilities after narrow fine-tuning. Mitigate with LoRA, lower learning rates, fewer epochs and mixed general data.
+</QA>
+<QA q="43. Explain RLHF.">
+SFT, then train a reward model on human preference pairs, then optimise the policy (PPO) to maximise reward minus a KL penalty to the reference model.
+</QA>
+<QA q="44. What is DPO?">
+Direct Preference Optimisation trains on chosen/rejected pairs with a classification-style loss derived from the RLHF objective. There is no reward model or RL loop, so it is simpler and more stable.
+</QA>
+<QA q="45. What is reward hacking?">
+The policy exploits reward-model weaknesses (verbosity, flattery) instead of truly improving. Mitigated by the KL penalty, better reward models and evaluation.
+</QA>
+<QA q="46. What is knowledge distillation for LLMs?">
+Train a small student on a large teacher's outputs for your task. It cuts cost and latency while keeping much of the quality.
+</QA>
+<QA q="47. How do you evaluate a fine-tuned model?">
+Held-out task metrics, pairwise LLM-judge comparison with the baseline, regression tests on general skills, and human review.
+</QA>
+<QA q="48. What is GRPO / RL fine-tuning on verifiable rewards?">
+Sample several answers per prompt, score them with verifiers or rubrics, and push the model toward above-average answers. It is used to train reasoning.
+</QA>
+<QA q="49. Multi-LoRA serving?">
+One base model in memory, with task or customer adapters hot-swapped per request (vLLM, TGI). Many custom models for roughly the cost of one.
+</QA>
+<QA q="50. What is continued pre-training?">
+Further next-token training on large raw domain corpora before instruction tuning, for big domain or language shifts. It is expensive.
+</QA>
+</Interview>
+
+## RAG and vector search
+
+<Level l="intermediate" />
+
+Go deeper: [RAG foundations](/learn/rag-foundations/core/), [advanced RAG](/learn/advanced-rag/core/).
+
+<Interview>
+<QA q="51. What is RAG and why use it?">
+Retrieve relevant data and include it in the prompt, so answers are grounded in private, fresh, citable knowledge, reducing hallucination.
+</QA>
+<QA q="52. Describe a RAG pipeline end to end.">
+Ingest → parse → clean → chunk → embed → index; then query → (rewrite) → retrieve (hybrid) → re-rank → build the prompt with citations → generate → check.
+</QA>
+<QA q="53. How do you choose chunk size?">
+Start at 300–800 tokens with 10–20% overlap; prefer structure-aware chunks with headers; tune on a golden set.
+</QA>
+<QA q="54. What is hybrid search?">
+Combine BM25 (exact terms) with dense vectors (semantics), usually fused with Reciprocal Rank Fusion.
+</QA>
+<QA q="55. Explain RRF.">
+The score is the sum over retrievers of 1/(k + rank). It rewards documents ranked well by several retrievers and needs no score normalisation.
+</QA>
+<QA q="56. Bi-encoder vs cross-encoder?">
+Bi-encoders embed query and document separately (fast, first-stage). Cross-encoders score the pair jointly (accurate, slow, used to re-rank the top candidates).
+</QA>
+<QA q="57. How does HNSW work?">
+A multi-layer proximity graph. Search starts at a sparse top layer and greedily descends to dense layers. M, `ef_construction` and `ef_search` trade recall against speed and memory.
+</QA>
+<QA q="58. IVF and PQ?">
+IVF clusters vectors and searches only the nearest clusters. PQ compresses vectors into short codes. Together they give billion-scale search with low memory.
+</QA>
+<QA q="59. What is HyDE?">
+Generate a hypothetical answer and embed it as the query; answers resemble documents more than questions do.
+</QA>
+<QA q="60. How do you handle follow-up questions in RAG?">
+Rewrite the latest question into a standalone query using the chat history before retrieval.
+</QA>
+<QA q="61. How do you enforce permissions in RAG?">
+Store ACL and tenant metadata per chunk and filter inside the vector/keyword query using the authenticated user's groups. Never rely on the LLM to hide data.
+</QA>
+<QA q="62. How do you keep the index fresh?">
+Incremental sync by content hash or events; delete stale chunks; sync ACL changes; idempotent workers; blue–green re-indexing on embedding changes.
+</QA>
+<QA q="63. How do you evaluate RAG?">
+Retrieval (hit@k, MRR, context recall/precision) separately from generation (faithfulness, relevance, correctness), on a golden set including unanswerable questions.
+</QA>
+<QA q="64. Faithfulness vs answer relevance?">
+Faithfulness asks whether claims are supported by the retrieved context. Relevance asks whether the answer addresses the question. An answer can be relevant but unfaithful.
+</QA>
+<QA q="65. What is GraphRAG and when is it useful?">
+Knowledge-graph-based retrieval (entities and relations), used for multi-hop and global questions. It is more expensive to build.
+</QA>
+<QA q="66. When is text-to-SQL better than RAG?">
+For numbers and aggregations over structured data. Validate SQL, run it read-only, and use a semantic layer.
+</QA>
+<QA q="67. How do you reduce RAG latency?">
+Parallel retrievers, a small rewrite model, fewer re-rank candidates on GPU, streaming, prompt caching and semantic caching.
+</QA>
+<QA q="68. How do you handle tables and images in documents?">
+Table-aware parsing to Markdown or HTML, captioning figures with VLMs, or page-image retrieval with multimodal models.
+</QA>
+<QA q="69. What is agentic RAG?">
+The model decides whether, where and how to retrieve, grades results, rewrites queries and retries, possibly across multiple sources and tools.
+</QA>
+<QA q="70. Long context vs RAG?">
+Long context is simpler for small, static corpora and strong at cross-document synthesis, but costly per query. RAG scales to any corpus size with lower cost and better citations. They are often combined.
+</QA>
+</Interview>
+
+## Agents, tools and MCP
+
+<Level l="intermediate" />
+
+Go deeper: [Agent foundations](/learn/agent-foundations/core/), [MCP](/learn/mcp/core/).
+
+<Interview>
+<QA q="71. What is an AI agent?">
+An LLM-driven loop that decides its own steps, calling tools and observing results until the goal is met.
+</QA>
+<QA q="72. Workflow vs agent?">
+Workflows have predetermined steps (predictable, cheap, testable). Agents choose steps dynamically. Use agents only when the path can't be known in advance.
+</QA>
+<QA q="73. Explain ReAct.">
+Interleaving reasoning (“thought”) with actions (tool calls) and observations in a loop.
+</QA>
+<QA q="74. How does function calling work?">
+Tools are declared with JSON schemas; the model returns a structured call; your code executes it and returns the result; the model continues.
+</QA>
+<QA q="75. Name agentic design patterns.">
+Prompt chaining, routing, parallelisation, orchestrator–workers, evaluator–optimiser, and autonomous agents.
+</QA>
+<QA q="76. How do you design good tools?">
+Few high-level tools, clear names and descriptions, concise outputs, helpful errors, idempotent writes, permission enforcement in code, and pagination.
+</QA>
+<QA q="77. How do you stop agents looping?">
+Step and time budgets, repeated-action detection, cost caps, progress checks, and escalation to humans.
+</QA>
+<QA q="78. What is human-in-the-loop?">
+Pausing for human approval before consequential actions, with the proposed action, rationale, evidence and impact shown. It needs checkpointed state.
+</QA>
+<QA q="79. What is LangGraph?">
+A framework that models agents as state graphs (nodes, edges, shared state) with checkpoints, interrupts, streaming and persistence.
+</QA>
+<QA q="80. What is MCP?">
+The Model Context Protocol, an open standard for exposing tools, resources and prompts from servers to any compatible AI client over stdio or HTTP.
+</QA>
+<QA q="81. MCP vs function calling?">
+Function calling is the model-API mechanism for requesting tool calls. MCP standardises how tools are packaged, discovered and served across applications.
+</QA>
+<QA q="82. How would you secure an MCP server?">
+Authentication (OAuth), least-privilege credentials, user-identity propagation, input validation, confirmations for writes, rate limits, audit logs, and treating tool outputs as untrusted.
+</QA>
+<QA q="83. Multi-agent — when is it worth it?">
+When sub-tasks need different tools, permissions or context. Otherwise one agent is cheaper and more reliable.
+</QA>
+<QA q="84. How do agents remember things?">
+Short-term context, summaries and compaction, structured state, and long-term stores (vector/KV) retrieved by relevance, with governance.
+</QA>
+<QA q="85. How do you evaluate agents?">
+Outcome success, trajectory (tool choice and args), efficiency (steps, cost), safety violations, and consistency over repeated runs (pass^k).
+</QA>
+<QA q="86. What is pass^k?">
+The probability that all k repeated attempts succeed, a reliability measure that matters more than best-case success.
+</QA>
+<QA q="87. What is durable execution?">
+Persisting agent state at each step so long workflows survive restarts and can pause for days (checkpointers, Temporal).
+</QA>
+<QA q="88. Browser agents — DOM vs vision?">
+DOM gives cheap, precise targeting of elements. Vision works on any UI but costs more and is error-prone. Hybrids are common, and APIs are preferable when available.
+</QA>
+<QA q="89. How do coding agents work?">
+Explore → plan → edit with targeted tools → run tests → iterate, inside a sandbox, ending with human-reviewed PRs.
+</QA>
+<QA q="90. What's the biggest security risk for agents?">
+Prompt injection combined with excessive agency: untrusted content steering an agent that can take powerful actions.
+</QA>
+</Interview>
+
+## Evaluation and observability
+
+<Level l="intermediate" />
+
+Go deeper: [Evaluation](/learn/evaluation/core/), [observability](/learn/observability/core/).
+
+<Interview>
+<QA q="91. Why are LLM evals hard?">
+Outputs are open-ended and non-deterministic, many answers can be correct, and metrics like BLEU miss meaning.
+</QA>
+<QA q="92. How do you build a golden dataset?">
+Real user queries plus expert-written and reviewed synthetic cases, covering edge cases, unanswerables and adversarial inputs; versioned.
+</QA>
+<QA q="93. Deterministic vs LLM-judge metrics?">
+Use deterministic checks (schema, keywords, citations, tests) wherever possible, and LLM judges for nuanced qualities, validated against humans.
+</QA>
+<QA q="94. Biases of LLM judges?">
+Position, verbosity and self-preference. Mitigate with swapped order, length control, a different judge family, and human calibration.
+</QA>
+<QA q="95. What do you trace in an LLM app?">
+Each request's prompts (versioned), model, retrieved documents, tool calls, tokens, latency per stage, cost, guardrail decisions and feedback.
+</QA>
+<QA q="96. Online evaluation methods?">
+Thumbs and feedback, implicit signals (rephrasing, escalation), sampled LLM-judge scoring, human review queues, A/B tests.
+</QA>
+<QA q="97. What's a regression gate?">
+CI that runs the eval suite on every prompt, model or retrieval change and blocks merges that drop below thresholds.
+</QA>
+<QA q="98. How do you detect quality drift in production?">
+Monitor sampled quality scores, feedback rates, refusal rates, output length and topic distribution per version, and alert on changes.
+</QA>
+<QA q="99. How do you A/B test an LLM feature?">
+Randomise users, define a primary metric and guardrails, compute the sample size, run long enough, and report effect sizes with confidence intervals.
+</QA>
+<QA q="100. What is TTFT and why track it?">
+Time to first token. It dominates perceived latency in streaming UIs.
+</QA>
+</Interview>
+
+## Production, LLMOps and cloud
+
+<Level l="advanced" />
+
+Go deeper: [Deployment](/learn/deployment-cicd/core/), [cloud LLMOps](/learn/cloud-llmops/core/).
+
+<Interview>
+<QA q="101. How do you make LLM calls reliable?">
+Timeouts, retries with backoff on retryable errors, fallbacks, validation, concurrency limits and circuit breakers.
+</QA>
+<QA q="102. What does an LLM gateway do?">
+Centralises keys, routing, fallbacks, budgets, rate limits, caching and logging across providers (LiteLLM, cloud gateways).
+</QA>
+<QA q="103. How do you deploy a streaming chat API?">
+Containerised FastAPI on ECS/Container Apps/ Kubernetes with SSE, long idle timeouts, autoscaling, Redis sessions, and secrets from a vault.
+</QA>
+<QA q="104. When self-host models?">
+Data residency or privacy requirements, steady high volume, or custom fine-tuned models, when you can operate GPUs. Otherwise APIs are usually cheaper.
+</QA>
+<QA q="105. What is vLLM and why is it fast?">
+PagedAttention (efficient KV-cache memory) plus continuous batching, giving high throughput and an OpenAI-compatible API.
+</QA>
+<QA q="106. How do you control LLM costs?">
+Routing, caching (prompt and semantic), shorter contexts, output caps, batch APIs, distillation, budgets and per-feature cost dashboards.
+</QA>
+<QA q="107. How do you upgrade models safely?">
+Offline evals, cost and latency comparison, prompt adjustments, shadow, canary, pinned versions and a rollback plan.
+</QA>
+<QA q="108. What do you version in a GenAI release?">
+Prompts, model IDs and parameters, tool schemas, retrieval config, guardrail config, eval datasets and results.
+</QA>
+<QA q="109. How do you handle long-running agent tasks in an API?">
+Return a job id (202), run in background workers, checkpoint state, and stream progress or send webhooks.
+</QA>
+<QA q="110. AWS vs Azure building blocks for GenAI?">
+Bedrock ↔ Azure OpenAI/AI Foundry; ECS/Lambda ↔ Container Apps/Functions; OpenSearch/Bedrock KB ↔ AI Search; SQS ↔ Service Bus; Secrets Manager ↔ Key Vault; IAM roles ↔ managed identities.
+</QA>
+</Interview>
+
+## Security, safety and governance
+
+<Level l="advanced" />
+
+Go deeper: [LLM security](/learn/alignment-safety/deep-dive/), [governance](/learn/governance/core/).
+
+<Interview>
+<QA q="111. What is prompt injection? Direct vs indirect?">
+Instructions that hijack the model. Direct injection comes from the user; indirect injection is embedded in documents, web pages, emails or tool outputs the model reads.
+</QA>
+<QA q="112. How do you defend against prompt injection?">
+Treat external content as data, isolate untrusted inputs, use least-privilege tools and allow-lists, require confirmations for side effects, run injection classifiers, and red-team regularly. No single defence is enough.
+</QA>
+<QA q="113. What is the OWASP Top 10 for LLM applications?">
+Injection, sensitive information disclosure, supply chain, poisoning, improper output handling, excessive agency, system prompt leakage, vector weaknesses, misinformation and unbounded consumption.
+</QA>
+<QA q="114. How do you handle PII?">
+Minimise what is sent, redact or pseudonymise (Presidio), set retention controls, use enterprise zero-retention options, enforce access controls, and keep PII out of fine-tuning data.
+</QA>
+<QA q="115. What is improper output handling?">
+Inserting LLM output into SQL, HTML or shell without validation, which causes injection or XSS. Treat model output as untrusted input.
+</QA>
+<QA q="116. How do you test for bias in an LLM app?">
+Counterfactual prompts (swap names or demographics), subgroup quality parity, refusal parity, and documented results.
+</QA>
+<QA q="117. What guardrail layers exist?">
+Input (injection, PII, topic), model (aligned model, system prompt), output (moderation, schema, groundedness), and action (approvals, allow-lists, limits).
+</QA>
+<QA q="118. What's in a system card?">
+Purpose, architecture, data, evaluation results, limitations and risks, monitoring, and change log.
+</QA>
+<QA q="119. What regulations matter for GenAI in India and globally?">
+India's DPDP Act (consent, purpose limitation, rights, breach duties), IT Rules and advisories on synthetic content, sector regulators; the EU AI Act (risk tiers, transparency, GPAI duties); GDPR; NIST AI RMF and ISO 42001 as frameworks.
+</QA>
+<QA q="120. How do you decide the level of human oversight?">
+Tier by impact × autonomy: low tier means periodic audit; medium means human-on-the-loop; high means human-in-the-loop approvals, audits and full documentation.
+</QA>
+</Interview>
+
+## Newer topics
+
+<Level l="advanced" />
+
+A few topics that appear in recent job descriptions. Go deeper: [agents](/learn/agent-foundations/deep-dive/), [MCP and Agent Skills](/learn/mcp/core/), [deployment](/learn/deployment-cicd/core/).
+
+<Interview>
+<QA q="What is the A2A protocol, and how is it different from MCP?">
+Agent2Agent is an open protocol for one agent to delegate work to another — often owned by another team or company — through agent cards (discovery), tasks with a lifecycle, messages and artifacts over JSON-RPC. MCP connects an agent to tools and data; A2A connects agents to agents. They're complementary.
+</QA>
+<QA q="What are Agent Skills?">
+Folders containing a SKILL.md file (a short name and description plus instructions) and optional scripts or templates. Agents load only the descriptions up front and read a skill's full contents when a request matches — progressive disclosure — so many skills can be installed cheaply. Review them like code, because they can run scripts.
+</QA>
+<QA q="Handoff vs agent-as-tool?">
+With a handoff, control passes to the other agent, which continues the conversation. With an agent-as-tool, a manager calls the specialist like a function, gets the result back and stays in charge — the supervisor pattern.
+</QA>
+<QA q="How do feature flags help ship LLM features?">
+They change behaviour at run time without a deploy: roll a new prompt or model out to 5% of users and widen gradually, target internal users first, A/B test variants, and switch off a misbehaving tool instantly. Log the flag values with every request so you know which variant produced an answer.
+</QA>
+<QA q="How would you load-balance a streaming LLM API?">
+A layer-7 load balancer using least-outstanding-requests rather than round robin, response buffering off, idle timeouts longer than the slowest answer, keep-alive pings, connection draining on deploys and no sticky sessions. Across providers use a gateway; across GPU replicas, prefix- and load-aware routing.
+</QA>
+</Interview>
+
+## Coding-round tasks to practise
+
+<Level l="intermediate" />
+
+Time yourself: 30–45 minutes each, with tests.
+
+- Implement a streaming chat endpoint with FastAPI and SSE ([APIs and streaming](/learn/python-backend/apis-async-streaming/)).
+- Write a tool-calling loop with error handling and a step limit ([agent foundations](/learn/agent-foundations/core/)).
+- Implement chunking with overlap, plus BM25 + cosine hybrid retrieval fused with RRF ([advanced RAG](/learn/advanced-rag/core/)).
+- Build a Pydantic-validated extraction function that retries on validation errors ([LLM APIs](/learn/llm-apis/core/)).
+- Implement a semantic cache with a similarity threshold ([advanced RAG deep dive](/learn/advanced-rag/deep-dive/)).
+- Write an evaluation script computing hit@k and MRR from a golden set ([evaluation](/learn/evaluation/core/)).
+- Implement exponential backoff with jitter for rate-limited API calls ([observability](/learn/observability/core/)).
+- Implement a token-budgeted context builder ([context engineering](/learn/context-engineering/core/)).
+
+## Behavioural stories to prepare
+
+<Level l="beginner" />
+
+Prepare each as a **STAR** story — situation, task, action, result — with numbers wherever you can:
+
+- A GenAI feature you shipped, and how you measured it.
+- A time you fixed hallucinations or bad retrieval.
+- A cost or latency optimisation, with before and after numbers.
+- A security or privacy risk you caught.
+- A disagreement about using AI versus a simpler solution.
+- Learning a new technology fast — your own transition story counts.
+
+<Tip>
+Your portfolio projects are your best source of stories. For each one, know the architecture, one hard problem you solved, your evaluation numbers and what you'd do next — the [career plan](/learn/career-plan/core/) shows how to present them.
+</Tip>
+
+<Takeaways>
+- Practise aloud: define, why it matters, example, trade-off — in under 90 seconds.
+- Make every model answer yours by adding an example from a project you built.
+- Prepare coding tasks and STAR stories alongside the concepts; interviews test all three.
+</Takeaways>

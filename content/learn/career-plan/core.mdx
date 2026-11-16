@@ -1,0 +1,171 @@
+---
+summary: "Landing an AI Engineer role: the job titles and what they really mean, a 90-day transition plan at about two hours a day, choosing portfolio projects that cover the market's checklist, a README template, reframing backend and integration experience honestly, weak vs strong résumé bullets, LinkedIn and GitHub, the interview loop round by round, take-home tips, a transition-story template and staying current."
+---
+
+## Role titles you'll see
+
+<Level l="beginner" />
+
+| Title | Usually means |
+|---|---|
+| AI Engineer / GenAI Engineer | Builds LLM-powered features and products (this site's focus) |
+| Applied AI / Applied ML Engineer | A mix of LLM apps and classical ML, sometimes fine-tuning |
+| LLM Engineer / LLMOps Engineer | Heavier on model serving, fine-tuning and evaluation infrastructure |
+| AI Platform Engineer | Internal platforms: gateways, vector infrastructure, eval tooling, agent frameworks |
+| Agentic AI Engineer | Agents, tools, MCP, orchestration, enterprise integrations |
+| Full-stack AI Engineer | End-to-end apps (backend + frontend) with LLM features |
+| ML Engineer | Broader: training pipelines, classical ML, sometimes GenAI |
+
+Read each job description closely. A "GenAI Engineer" role at a bank may be mostly backend integration with RAG; at a product start-up it may be agents and evaluation; at a services company it may be delivering client solutions across many use cases.
+
+## A 90-day transition plan
+
+<Level l="beginner" />
+
+About **two hours a day**. Each block ends with something you can show.
+
+| Days | Focus | Output |
+|---|---|---|
+| 1–15 | LLM fundamentals, APIs, prompting, structured outputs, context engineering ([LLM line](/learn/how-llms-work/core/)) | A production LLM client library on GitHub; [Project 02 · Resume–Job Matcher](/projects/resume-jd-matcher/) |
+| 16–30 | Full-stack LLM apps, fine-tuning, multimodal | [Project 03 · Invoice Extraction](/projects/document-extraction/) or [Project 01 · PolicyPal](/projects/policypal-hr-assistant/); blog post #1 |
+| 31–50 | RAG end to end with evaluation ([RAG line](/learn/rag-foundations/core/)) | [Project 04 · Policy RAG](/projects/policy-rag/) with an evaluation report; [Project 05 · Support Chatbot](/projects/support-chatbot/) |
+| 51–70 | Agents, MCP, agent patterns ([Agents line](/learn/agent-foundations/core/)) | [Project 08 · OpenAPI → MCP](/projects/openapi-mcp-server/); [Project 09 · Research Agent](/projects/research-agent/); blog post #2 |
+| 71–80 | LLMOps, cloud deployment, observability ([Production line](/learn/deployment-cicd/core/)) | One project deployed on AWS or Azure with a CI eval gate and dashboards |
+| 81–90 | Interview preparation | 4 mock system designs ([cases](/learn/system-design/core/)), 2 passes of the [question bank](/learn/interview-bank/core/), résumé and LinkedIn updated, applications sent |
+
+<Tip>
+**Depth beats breadth.** Three polished, deployed projects with evaluation reports beat ten tutorial clones. Interviewers probe your decisions: why this chunk size, why this model, how you measured, what failed, what you'd change.
+</Tip>
+
+## Choosing portfolio projects
+
+<Level l="beginner" />
+
+Pick projects that together cover the market's checklist:
+
+| Skill area | Portfolio evidence |
+|---|---|
+| RAG + evaluation | [Project 04](/projects/policy-rag/) or [05](/projects/support-chatbot/) with RAGAS / DeepEval numbers and ablations |
+| Agents + tools + MCP | [Project 08](/projects/openapi-mcp-server/) (OpenAPI → MCP) and [09](/projects/research-agent/) (multi-agent with human approval) |
+| Structured extraction / document AI | [Project 02](/projects/resume-jd-matcher/) or [03](/projects/document-extraction/) with field-level accuracy |
+| Fine-tuning | [Project 01](/projects/policypal-hr-assistant/) with a base vs fine-tuned comparison |
+| Production engineering | One project with Docker, a CI eval gate, cloud deployment, tracing and a cost dashboard ([Project 07](/projects/sales-data-analyst/)) |
+| Full-stack | A streaming UI (Next.js or Streamlit) with auth and feedback |
+| Domain relevance | At least one project in the industry you're targeting (fintech, HR tech, e-commerce, healthcare) |
+
+### The project README template
+
+```markdown title="README.md"
+# Project name — one-line value proposition
+![demo gif](docs/demo.gif)
+
+## Problem
+Who has it, why it matters, what success looks like (a metric).
+
+## Architecture
+Diagram + a 5-line explanation of the components and data flow.
+
+## Key decisions
+- Model choice (why, alternatives tried, cost/latency)
+- Retrieval / tools / orchestration choices and trade-offs
+
+## Evaluation
+Dataset (size, how it was built) · metrics table · ablations (what each component adds) · failure analysis
+
+## Production readiness
+Deployment, CI eval gate, observability, guardrails, cost per request
+
+## Limitations and next steps
+
+## Run it
+docker compose up · env vars · sample requests
+```
+
+## Reframing backend and integration experience
+
+<Level l="beginner" />
+
+Many AI Engineers come from backend work — and much of it transfers directly. Map your experience to AI-engineering language **truthfully**: don't claim AI work you didn't do; show the transferable skills and pair them with real AI projects.
+
+| Existing experience | How it transfers |
+|---|---|
+| REST / OpenAPI services and integrations | Tool and MCP server design, schema-first thinking, OAuth, rate limits, retries |
+| Data mapping between systems (e.g. HR platforms) | Structured extraction schemas, validation, data quality |
+| Async jobs, queues, webhooks | Ingestion pipelines, long-running agent tasks, event-driven RAG updates |
+| Observability and incident handling | LLM tracing, eval dashboards, AI incident runbooks |
+| Cloud deployment (AWS / Azure) | GenAI reference architectures (Bedrock / Azure OpenAI, containers, vector search) |
+| Security and compliance work | Guardrails, personal-data handling, access control in retrieval, governance |
+
+## Résumé bullets: weak vs strong
+
+<Level l="beginner" />
+
+**Formula:** action verb + what you built + technique + measurable result.
+
+| Weak | Strong (example numbers) |
+|---|---|
+| "Worked on a RAG chatbot using LangChain." | "Built a RAG assistant over 1,200 HR policy pages (hybrid BM25 + vector search, cross-encoder re-ranking); raised hit@5 from 0.78 to 0.93 and faithfulness to 0.91 on a 60-question golden set." |
+| "Used LLMs for document extraction." | "Shipped an invoice-extraction service with a vision LLM, rule-based validation and confidence routing; 96% field accuracy, 72% straight-through processing, $0.004 per page." |
+| "Familiar with agents and MCP." | "Developed an OpenAPI → MCP generator exposing 8 curated HR API operations to agents with OAuth2, confirmations and audit logs; curation improved tool-selection accuracy from 71% to 94%." |
+| "Fine-tuned a model." | "QLoRA-fine-tuned a 1.5B model for structured HR responses; matched a large API model on JSON validity (99%) at about 1/20th of the cost per request." |
+| "Deployed to cloud." | "Deployed a streaming chat API on ECS Fargate with Bedrock, CI evaluation gates and Langfuse tracing; p95 time to first token 0.9 s." |
+
+<Pitfall>
+The numbers above are examples of the *shape* of a strong bullet. Use the numbers from **your own** evaluation reports — those are legitimate and impressive. Never invent metrics: interviewers ask how you measured them.
+</Pitfall>
+
+## LinkedIn and GitHub
+
+<Level l="beginner" />
+
+- **Headline:** for example, "Backend Engineer → AI Engineer | RAG · Agents · MCP · LLMOps | Python · FastAPI · AWS/Azure".
+- **Pin your best three or four repositories**, each with a demo GIF, an architecture diagram and an evaluation table.
+- **Write short posts** about what you learned ("What re-ranking did to my RAG metrics"). They show communication skills and attract recruiters.
+- **Contribute** small fixes or examples to open-source GenAI libraries — credible evidence of skill.
+
+## The interview loop
+
+<Level l="intermediate" />
+
+| Round | What they test | Preparation |
+|---|---|---|
+| Recruiter screen | Motivation, fit, basics | A crisp 60-second transition story |
+| Coding (DSA or practical) | Problem solving, Python | DSA patterns; practical LLM coding tasks ([list](/learn/interview-bank/core/)) |
+| GenAI concepts | LLMs, RAG, agents, evals, security | The [question bank](/learn/interview-bank/core/), two passes aloud |
+| System design (GenAI) | Architecture, trade-offs, numbers | The [case studies](/learn/system-design/core/); practise drawing one in 35 minutes |
+| Take-home assignment | Building a small app quickly and well | A template repo ready (FastAPI + LLM client + eval script + Docker) |
+| Project deep dive | Ownership, decisions, honesty about limits | Rehearse each portfolio project: architecture, metrics, failures |
+| Behavioural | Collaboration, judgement, learning | 6–8 STAR stories |
+
+### Take-home assignment tips
+
+1. Clarify the scope; state your assumptions in the README.
+2. Get a thin end-to-end version working first.
+3. Add a small evaluation script with 10–20 cases, even if it isn't asked for. It stands out.
+4. Handle errors, timeouts and invalid model outputs.
+5. Keep secrets out of the repo (commit a `.env.example`, never `.env`).
+6. Include a short "what I'd do with more time" section: cost, scaling, safety, evaluation.
+
+## Your transition story
+
+<Level l="beginner" />
+
+A template to adapt — keep it to about 60 seconds:
+
+> "I've spent N years building backend services and enterprise integrations — APIs, data mapping, async pipelines on AWS and Azure. Over the past months I've focused on GenAI engineering: I built and evaluated RAG systems, agents with MCP tool servers, and document-extraction pipelines, and deployed them with CI evaluation gates and tracing. My backend background means I think about reliability, security and cost from day one, which is where many GenAI prototypes struggle in production. I'm looking for a role where I can build production AI features end to end."
+
+## Staying current without drowning
+
+<Level l="beginner" />
+
+- Follow the official changelogs of two or three model providers and frameworks you use.
+- Read the model and system cards for major releases.
+- One deep article or paper a week; implement one small idea a month.
+- Re-run your own evals when switching models rather than trusting leaderboards ([choosing models](/learn/choosing-models/core/)).
+- Keep a personal "lessons learned" document — it becomes interview material.
+
+<Takeaways>
+- Target the skill checklist with 3–5 deep, deployed, evaluated projects.
+- Translate backend and integration experience truthfully into AI-engineering strengths, and use your own measured numbers.
+- Prepare for the whole loop: coding, GenAI concepts, system design, take-home, project deep dives and behavioural stories.
+</Takeaways>
