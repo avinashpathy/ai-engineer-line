@@ -48,8 +48,8 @@ export default async function ProjectPage({ params }: Params) {
           </aside>
         </div>
         <nav className="pager" aria-label="Previous and next project">
-          {prev ? <Link className="panel" href={`/projects/${prev.slug}/`}><span className="mono">← {prev.starter ? "Starter" : "Project"} {projectLabel(prev)}</span><b>{prev.title}</b></Link> : <span />}
-          {next && <Link className="panel next" href={`/projects/${next.slug}/`}><span className="mono">{next.starter ? "Starter" : "Project"} {projectLabel(next)} →</span><b>{next.title}</b></Link>}
+          {prev ? <Link className="panel" href={`/projects/${encodeURIComponent(prev.slug)}/`}><span className="mono">← {prev.starter ? "Starter" : "Project"} {projectLabel(prev)}</span><b>{prev.title}</b></Link> : <span />}
+          {next && <Link className="panel next" href={`/projects/${encodeURIComponent(next.slug)}/`}><span className="mono">{next.starter ? "Starter" : "Project"} {projectLabel(next)} →</span><b>{next.title}</b></Link>}
         </nav>
       </div>
     </div>

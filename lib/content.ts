@@ -57,7 +57,8 @@ export const projectLabel = (p: { order: number; code?: string }) => p.code ?? S
 export function projects(): ProjectMeta[] {
   const dir = path.join(ROOT, "projects");
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(f => f.endsWith(".mdx")).map(f => {
+  // Slugs become URLs, so only allow simple lowercase names (defence in depth: files come from this repo).
+  return fs.readdirSync(dir).filter(f => /^[a-z0-9-]+\.mdx$/.test(f)).map(f => {
     const { data } = matter(fs.readFileSync(path.join(dir, f), "utf8"));
     return { slug: f.replace(/\.mdx$/, ""), ...(data as Omit<ProjectMeta, "slug">) };
   }).sort((a, b) => a.order - b.order);

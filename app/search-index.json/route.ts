@@ -12,7 +12,7 @@ export function GET() {
       const { source } = readLesson(l.station, l.slug);
       return { href: `/learn/${l.key}/`, title: l.title, tag: `Lesson · ${STATIONS.find(s => s.id === l.station)!.short}`, line: l.line, text: (l.title + " " + plainText(source)).toLowerCase().slice(0, 6000) };
     }),
-    ...projects().map(p => ({ href: `/projects/${p.slug}/`, title: p.title, tag: `${p.starter ? "Starter" : "Project"} ${projectLabel(p)}`, line: "", text: (p.title + " " + p.tagline + " " + plainText(readProject(p.slug).source)).toLowerCase().slice(0, 4000) })),
+    ...projects().map(p => ({ href: `/projects/${encodeURIComponent(p.slug)}/`, title: p.title, tag: `${p.starter ? "Starter" : "Project"} ${projectLabel(p)}`, line: "", text: (p.title + " " + p.tagline + " " + plainText(readProject(p.slug).source)).toLowerCase().slice(0, 4000) })),
     ...GLOSSARY.map(([t, d]) => ({ href: `/glossary/#g-${t[0].toUpperCase()}`, title: `${t}: ${d}`, tag: "Glossary", line: "", text: (t + " " + d).toLowerCase() })),
   ];
   return Response.json(entries);
