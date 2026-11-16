@@ -1,0 +1,295 @@
+---
+summary: "MLOps and LLMOps for agent systems: why ML is harder to ship, maturity levels, what to version, Docker done right, deployment options, async architecture for long-running agents, rolling, blue–green, canary, shadow and A/B releases, feature flags and kill switches for prompts and models, rollbacks, CI/CD with evaluation gates in GitHub Actions, and the testing pyramid for agents."
+---
+
+## What is MLOps?
+
+<Level l="intermediate" />
+
+**MLOps** applies DevOps discipline to machine learning: making models reproducible, deployable, monitored and continuously improvable. For LLM and agent systems it's often called **LLMOps**.
+
+```mermaid caption="ML systems are never done: monitoring feeds back into data, prompts and retraining."
+flowchart LR
+  D[Data] --> B[Build<br/>train · prompt · configure]
+  B --> E[Evaluate]
+  E --> DEP[Deploy]
+  DEP --> M[Monitor]
+  M -- drift · failures · feedback --> D
+```
+
+Why ML is harder than normal software:
+
+- behaviour depends on **code + data + model + prompts + configuration**;
+- models degrade **silently** as the world changes;
+- outputs are **probabilistic**;
+- there are many experiments to keep track of.
+
+### MLOps maturity
+
+| Level | Description |
+|---|---|
+| 0 — manual | Notebooks, manual deployment, no monitoring |
+| 1 — pipeline automation | Automated training pipeline, experiment tracking, model registry, continuous training |
+| 2 — CI/CD automation | Automated testing and deployment of pipelines and models; monitoring triggers retraining |
+
+### What gets versioned
+
+| Artefact | Tool |
+|---|---|
+| Code | Git |
+| Data | DVC, lakeFS, Delta Lake time travel |
+| Experiments (parameters, metrics, artefacts) | MLflow, Weights & Biases |
+| Models | MLflow Model Registry, Hugging Face Hub |
+| Prompts and agent configs | Git (YAML/Jinja), prompt registries (LangSmith, Langfuse) |
+| Evaluation sets and results | Git / DVC + your eval tool |
+| Environments | `requirements.txt` / `uv.lock`, Docker images |
+
+```python title="track_experiment.py"
+import mlflow, mlflow.sklearn
+from sklearn.metrics import roc_auc_score
+
+mlflow.set_experiment("churn")
+with mlflow.start_run(run_name="lgbm-v3"):
+    mlflow.log_params({"num_leaves": 31, "lr": 0.03})
+    model.fit(X_train, y_train)
+    mlflow.log_metric("roc_auc", roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+    mlflow.sklearn.log_model(model, "model", registered_model_name="churn-classifier")
+# `mlflow ui` -> compare runs; promote a version to production with an alias in the registry
+```
+
+## Containerising with Docker
+
+<Level l="intermediate" />
+
+A **container** packages your app with its exact dependencies, so it runs the same on your laptop, in CI and in production.
+
+```dockerfile title="Dockerfile"
+# Multi-stage build for a Python AI service
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim
+WORKDIR /app
+RUN useradd -m appuser                      # never run as root
+COPY --from=builder /install /usr/local
+COPY src/ ./src/
+USER appuser
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+```
+
+Best practices:
+
+- Small base images and multi-stage builds; pinned versions.
+- A non-root user.
+- **No secrets baked in** — use environment variables and secret managers.
+- A `.dockerignore` that excludes data, notebooks and `.env` files.
+- One process per container; health checks.
+- For GPU workloads, use `nvidia/cuda` base images and the NVIDIA container toolkit.
+
+```yaml title="docker-compose.yml"
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env                 # never committed
+    depends_on: [postgres, redis]
+  worker:
+    build: .
+    command: ["arq", "src.worker.WorkerSettings"]
+    env_file: .env
+    depends_on: [redis]
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment: { POSTGRES_PASSWORD: dev-only }
+  redis:
+    image: redis:7-alpine
+```
+
+## Deployment infrastructure
+
+<Level l="intermediate" />
+
+| Option | What it is | Fits |
+|---|---|---|
+| Serverless containers (Cloud Run, Azure Container Apps, AWS App Runner / Fargate) | Run a container, scale to zero, pay per use | Most LLM-API-based agents and RAG services |
+| Kubernetes (EKS, AKS, GKE) | Orchestrates many containers: scaling, rolling updates, self-healing | Many services, GPU model serving, enterprise platforms |
+| Managed ML platforms (SageMaker, Azure ML, Vertex AI, Databricks) | Training + registry + endpoints + monitoring | Teams wanting integrated MLOps |
+| Model-serving engines (vLLM, TGI, Triton, KServe, Ray Serve) | High-throughput inference for self-hosted models | Open-weight LLMs on GPUs |
+| AI gateways (LiteLLM, cloud API management) | One interface to many LLM providers: routing, fallbacks, rate limits, cost tracking, keys | Any multi-model setup |
+
+A typical agentic system: an API service (a FastAPI agent) + a vector database + a cache and session store (Redis) + a task queue for long jobs (arq, Celery, or a durable workflow engine like Temporal) + an LLM gateway + an observability stack.
+
+<Tip>
+**Long-running agents need an async architecture.** An agent that researches for 3 minutes shouldn't hold an HTTP request open. Accept the job (`202 Accepted` + a job ID), run it on a worker, save state at each step (a LangGraph checkpointer), and let clients poll, stream or receive a webhook ([queues and background jobs](/learn/python-backend/production-backend/)).
+</Tip>
+
+## Releasing safely
+
+<Level l="intermediate" />
+
+| Strategy | How | Why |
+|---|---|---|
+| Rolling | Replace instances gradually | The default; no downtime |
+| Blue–green | Run old (blue) and new (green) side by side; switch traffic at once | Safe cut-over; instant rollback |
+| **Canary** | Send 5% of traffic to the new version, watch metrics, then expand | Catch problems with a small blast radius |
+| Shadow | The new version receives copies of real traffic; its responses aren't shown | Compare safely before release |
+| A/B test | Split users, compare business metrics | Measure real impact |
+
+```mermaid caption="A canary release: traffic moves to the new version in steps, and any alarm sends it all back."
+flowchart LR
+  V[New version deployed] --> C5[5% of traffic]
+  C5 --> W1{Error rate, latency,<br/>eval scores OK?}
+  W1 -- yes --> C25[25%] --> W2{Still OK?}
+  W2 -- yes --> C100[100%]
+  W1 -- no --> RB[Roll back to previous]
+  W2 -- no --> RB
+```
+
+### Feature flags and kill switches
+
+A **feature flag** is a switch your code checks at run time, so you can change behaviour **without redeploying**. For AI systems, flags are the safest way to roll out a new prompt, model or tool:
+
+- **Gradual rollout:** turn the new prompt on for 5% of users, then 25%, then everyone.
+- **Kill switch:** instantly turn off a misbehaving tool, agent step or provider.
+- **Targeting:** enable a beta feature only for internal staff or one customer.
+- **Experiments:** two flag variants are an A/B test ([A/B testing prompts](/learn/prompt-engineering/core/)).
+
+```python title="flags.py"
+import hashlib, json, pathlib
+
+FLAGS = json.loads(pathlib.Path("flags.json").read_text())   # in production: a flag service, cached
+# flags.json:
+# {"support_prompt_v4": {"enabled": true, "rollout_percent": 10, "allow_tenants": ["acme-internal"]},
+#  "refund_tool":       {"enabled": false}}
+
+def bucket(flag: str, user_id: str) -> int:
+    """Stable 0-99 bucket: the same user always gets the same answer for a flag."""
+    return int(hashlib.sha256(f"{flag}:{user_id}".encode()).hexdigest(), 16) % 100
+
+def is_on(flag: str, user_id: str, tenant: str | None = None) -> bool:
+    f = FLAGS.get(flag)
+    if not f or not f.get("enabled"):
+        return False                                           # unknown or disabled = off (fail safe)
+    if tenant and tenant in f.get("allow_tenants", []):
+        return True
+    return bucket(flag, user_id) < f.get("rollout_percent", 100)
+
+prompt_version = "v4" if is_on("support_prompt_v4", user.id, user.tenant) else "v3"
+tools = [t for t in ALL_TOOLS if t.name != "create_refund" or is_on("refund_tool", user.id)]
+```
+
+Hashing the flag name with the user ID keeps each user's experience stable while spreading users evenly. In production, use a flag service — LaunchDarkly, Unleash, Flagsmith, or a provider behind the vendor-neutral **OpenFeature** API — so non-engineers can flip flags with an audit trail.
+
+<Pitfall>
+**Log the flag values with every request** (which prompt version, which model). Otherwise you can't tell which variant produced a bad answer. Remove flags once a rollout is finished — old flags become confusing dead code.
+</Pitfall>
+
+### Rollbacks
+
+Plan the way back before you need it:
+
+| What changed | How to roll back |
+|---|---|
+| Application code | Redeploy the previous image tag (`kubectl rollout undo`, a previous Cloud Run revision, `helm rollback`) |
+| Prompt or model | Flip the feature flag back, or point the alias to the previous prompt version |
+| Index or embedding model | Switch traffic back to the old index (keep it during [blue–green re-indexing](/learn/production-rag/core/)) |
+| Database schema | Write backward-compatible migrations (expand first, contract later) so old code still runs |
+
+Use **immutable image tags** (a version or commit SHA, never `:latest`), and automate rollback when error rates or quality alarms fire.
+
+## CI/CD for ML and agents
+
+<Level l="intermediate" />
+
+**Continuous integration** on every pull request:
+
+1. Lint, type-check and unit-test (tools, parsers, feature functions).
+2. Data validation tests (schemas, ranges — Great Expectations, Pandera).
+3. **Model / agent evaluation:** run the golden set and **fail the build** if quality drops below thresholds — accuracy, faithfulness, tool-call correctness, refusal accuracy ([evaluation](/learn/evaluation/deep-dive/)).
+4. Security scans: dependencies, container image, secret detection.
+5. Build and push the Docker image.
+
+**Continuous delivery:** deploy to staging → smoke and integration tests → canary in production → automatic rollback on error-rate or quality alarms.
+
+**Continuous training:** a scheduled or drift-triggered retraining pipeline that compares the candidate with the current model and promotes it only if it's better.
+
+```yaml title=".github/workflows/ci.yml"
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check . && pytest -q tests/unit
+      - name: Agent evaluation on the golden set (the eval gate)
+        env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" }
+        run: python -m evals.run --suite golden --min-pass-rate 0.90 --report eval_report.md
+      - uses: actions/upload-artifact@v4
+        with: { name: eval-report, path: eval_report.md }
+  build:
+    needs: test-and-eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+      # push and deploy steps (Cloud Run / AKS / ECS) go here, usually on merge to main
+```
+
+<Note>
+Pull requests from forks don't receive repository secrets, so the eval gate can't call a paid API for them. Run it on branches inside the repository, or on a label added by a maintainer — never expose API keys to untrusted code.
+</Note>
+
+## Testing agents
+
+<Level l="intermediate" />
+
+| Test type | What it checks |
+|---|---|
+| Unit tests | Each tool function, parsers, prompt rendering |
+| Mocked-LLM tests | Agent control flow with a fake model returning scripted tool calls |
+| Trajectory tests | Did the agent call the right tools, with valid arguments, in a sensible order? |
+| End-to-end evals | Final answer quality on the golden set (LLM judge + exact checks) |
+| Adversarial tests | Prompt injection, unsafe requests, malformed tool outputs |
+| Load tests | Latency and throughput under concurrency (Locust, k6) |
+
+```python title="test_agent.py"
+# A mocked-LLM test: checks control flow without paying for tokens
+def test_agent_calls_sql_then_answers(monkeypatch):
+    scripted = iter([{"tool": "run_sql", "args": {"query": "SELECT 1"}},
+                     {"final": "Revenue grew 15.7%"}])
+    monkeypatch.setattr("agent.llm_step", lambda msgs: next(scripted))
+    calls = []
+    monkeypatch.setattr("agent.TOOLS", {"run_sql": lambda query: calls.append(query) or [[1]]})
+    from agent import run
+    assert run("growth?") == "Revenue grew 15.7%"
+    assert calls == ["SELECT 1"]
+```
+
+<Interview>
+<QA q="How do you release a new prompt safely?">
+Version it in Git, run the golden-set eval in CI as a gate, then roll it out behind a feature flag — 5%, 25%, 100% — while watching quality, cost and error metrics, with the flag as an instant rollback. Log the prompt version on every request.
+</QA>
+<QA q="Canary vs shadow deployment?">
+A canary serves real users from the new version, but only a small share of them. A shadow deployment sends copies of real traffic to the new version without showing its responses, so you can compare safely before any user sees it.
+</QA>
+<QA q="What goes in a CI pipeline for an agent?">
+Lint and unit tests, mocked-LLM control-flow tests, a golden-set evaluation gate with thresholds, adversarial tests, security scans and an image build — followed by staging, a canary and automatic rollback.
+</QA>
+</Interview>
+
+<Takeaways>
+- Version everything that changes behaviour: code, data, models, prompts, configs and evaluation sets.
+- Containerise with small, non-root, secret-free images; run long agents asynchronously.
+- Release with canaries and feature flags, plan rollbacks in advance, and gate every change on evaluations in CI.
+</Takeaways>

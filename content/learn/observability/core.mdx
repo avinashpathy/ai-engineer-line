@@ -1,0 +1,177 @@
+---
+summary: "Why agents need more observability than normal services, tracing every LLM and tool call, what to monitor (operations, cost, behaviour, quality, safety, drift), data, concept and prediction drift with a worked PSI example, reliability engineering for agents (retries with jitter, fallbacks, circuit breakers, validation, budgets, checkpoints), behavioural regression testing, and SLOs with error budgets."
+---
+
+## Why observability matters more for agents
+
+<Level l="intermediate" />
+
+Agents are **non-deterministic, multi-step and stateful**. The same input can take different paths, and a failure can hide in step 7 of a trajectory. Without tracing you can't answer the most common production question: **"why did it do that?"**
+
+## Tracing
+
+<Level l="intermediate" />
+
+A **trace** records an entire run as a tree of **spans**: the request; each LLM call (prompt, response, model, tokens, latency, cost); each tool call (inputs, outputs, errors); retrieval results; and the final answer.
+
+```mermaid caption="One trace for one agent request. Each span records its inputs, outputs, timing and cost, so you can see exactly where it went wrong."
+flowchart TD
+  R[Request: why did South revenue drop? · 6.2 s · ₹1.40] --> L1[LLM call 1 · plan · 0.9 s · 1.2k tokens]
+  R --> T1[Tool: get_schema · 40 ms]
+  R --> T2[Tool: run_sql · 310 ms · 12 rows]
+  R --> T3[Tool: search_kb · 120 ms · 4 chunks]
+  R --> L2[LLM call 2 · answer · 3.8 s · 2.9k tokens]
+  R --> G[Guardrail: output check · passed]
+```
+
+Tools: LangSmith, **Langfuse** (open source), Arize Phoenix, Helicone, Weights & Biases Weave. The standard underneath is **OpenTelemetry** with GenAI semantic conventions, so traces can also flow into Datadog, Grafana and the rest of your stack. Setup code for Langfuse and OpenTelemetry is in [Evaluation](/learn/evaluation/core/) and the [deep dive](/learn/observability/deep-dive/).
+
+## What to monitor
+
+<Level l="intermediate" />
+
+| Category | Metrics |
+|---|---|
+| Operational | Request rate, error rate, p50/p95/p99 latency, time to first token, timeouts |
+| Cost | Tokens in/out per request, cost per task, cost per user, cache hit rate |
+| Agent behaviour | Steps per task, tool-call success/failure rate, loops detected, step-limit hits, human-escalation rate |
+| Quality | Online LLM-judge scores on sampled traffic (faithfulness, helpfulness), user feedback, task success rate |
+| Safety | Guardrail triggers, refusals, personal-data detections, injection attempts |
+| Data / model drift | Input distributions, prediction distribution, performance once labels arrive (classical ML) |
+
+## Drift detection for classical ML
+
+<Level l="intermediate" />
+
+- **Data drift:** the input distribution shifts (new customer demographics). Detect it per feature with the **PSI** (population stability index), a KS test or Jensen–Shannon distance.
+- **Concept drift:** the relationship between inputs and the target changes (fraud patterns evolve). Detect it through performance decay once labels arrive.
+- **Prediction drift:** the output distribution changes — an early warning when labels are delayed.
+
+PSI = Σ (actual% − expected%) × ln(actual% / expected%), summed over buckets. Rule of thumb: **below 0.1** stable; **0.1–0.25** moderate shift, investigate; **above 0.25** significant, likely retrain.
+
+<Example title="Worked example: PSI">
+Bucket a feature into deciles on the training data, so each bucket expects **10%**. Last week in production, the ten buckets held:
+
+**4, 6, 8, 9, 10, 10, 11, 12, 5, 25** (percent).
+
+Each bucket's contribution, e.g. the last one: (0.25 − 0.10) × ln(25/10) = 0.15 × 0.916 = **0.137**. The first: (0.04 − 0.10) × ln(4/10) = (−0.06) × (−0.916) = **0.055**.
+
+Adding all ten gives **PSI ≈ 0.26** — just over 0.25, a significant shift. The top bucket alone contributes more than half of it, so start by asking why so many more high values are arriving.
+</Example>
+
+```python title="drift_report.py"
+# pip install evidently
+from evidently import Report
+from evidently.presets import DataDriftPreset
+
+report = Report([DataDriftPreset()])
+result = report.run(reference_data=train_df, current_data=last_week_df)
+result.save_html("drift_report.html")
+```
+
+For LLM applications, the equivalent is watching **what users ask**: track topic clusters, languages and query lengths over time, and watch for a rising "no answer" rate — new kinds of questions your knowledge base doesn't cover.
+
+## Reliability engineering for agents
+
+<Level l="intermediate" />
+
+| Failure | Mitigation |
+|---|---|
+| LLM API timeouts, rate limits, outages | Retries with exponential backoff + jitter; a fallback model or provider via a gateway; circuit breakers |
+| Malformed tool calls or JSON | Schema validation; structured-output mode; retry with the validation error fed back |
+| Tool errors | Return errors to the model as observations ("SQL error: column not found") so it can correct itself; cap retries |
+| Infinite loops | Step limits, repeated-action detection, cost budgets |
+| Context overflow | Summarise history; trim tool outputs (top rows, not 10,000) |
+| Wrong but confident answers | Verification steps; an evaluator agent; require evidence and citations |
+| Bugs you can't reproduce | Log seeds, model versions, prompts and full traces; replay traces in tests |
+| Partial failures in long tasks | Checkpoint state each step; resume instead of restarting; idempotent tools |
+
+```python title="reliability.py"
+import random, time
+from functools import wraps
+
+def with_retries(max_attempts=4, base=0.5, retry_on=(TimeoutError, ConnectionError)):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*a, **kw):
+            for attempt in range(max_attempts):
+                try:
+                    return fn(*a, **kw)
+                except retry_on:
+                    if attempt == max_attempts - 1:
+                        raise
+                    time.sleep(base * 2 ** attempt + random.uniform(0, 0.2))   # backoff + jitter
+        return wrapper
+    return deco
+
+class CircuitBreaker:
+    """After repeated failures, stop calling a provider for a while and use the fallback immediately."""
+
+    def __init__(self, threshold=5, cooldown_s=30):
+        self.failures, self.opened_at, self.threshold, self.cooldown = 0, None, threshold, cooldown_s
+
+    def call(self, fn, fallback, *a, **kw):
+        if self.opened_at and time.time() - self.opened_at < self.cooldown:
+            return fallback(*a, **kw)                    # open: don't hammer a failing service
+        try:
+            result = fn(*a, **kw)
+            self.failures, self.opened_at = 0, None      # success closes the circuit
+            return result
+        except Exception:
+            self.failures += 1
+            if self.failures >= self.threshold:
+                self.opened_at = time.time()
+            return fallback(*a, **kw)
+```
+
+Jitter matters: without it, every client that failed at the same moment retries at the same moment, and knocks the recovering service over again.
+
+## Behavioural regression testing
+
+<Level l="intermediate" />
+
+Prompt edits, model upgrades and tool changes can silently alter behaviour. Defend with:
+
+1. **A versioned evaluation suite:** golden tasks with expected outcomes, expected tool trajectories, and adversarial cases.
+2. **Run it on every change** (in CI) **and on a schedule** — models behind APIs can change without you deploying anything.
+3. **Compare against the baseline:** pass rate, judge scores, cost, latency, steps per task. Gate releases on no significant regression.
+4. **Replay production traces** — especially failures and thumbs-down answers — as new test cases, so the suite grows with reality.
+5. **Track the metrics over time** on dashboards, and alert on drops.
+
+## SLOs for AI services
+
+<Level l="intermediate" />
+
+A **service level objective** (SLO) is a target you commit to. For an AI service, set them for quality and cost as well as uptime:
+
+| SLO | Example target |
+|---|---|
+| Availability | 99.5% of requests succeed |
+| Latency | p95 below 4 s for chat; below 60 s for research tasks |
+| Task success | ≥ 85% on the weekly sampled evaluation |
+| Safety | Guardrail false-negative rate below 1% on the adversarial suite |
+| Cost | Below ₹3 per task |
+
+<Example title="Worked example: an error budget">
+A 99.5% availability SLO over 30 days allows 0.5% × 30 × 24 × 60 = **216 minutes** (about 3.6 hours) of failure. That's the **error budget**.
+
+If a bad release burns 100 minutes in one afternoon, nearly half the month's budget is gone. Alert on the **burn rate** — how fast you're spending the budget — rather than on single errors, and slow down risky releases when the budget runs low.
+</Example>
+
+<Interview>
+<QA q="What would you monitor for an agent in production?">
+Operations (rate, errors, p95 latency, time to first token), cost (tokens and cost per task), behaviour (steps, tool failures, loops, escalations), quality (sampled judge scores, feedback, task success) and safety (guardrail triggers, injection attempts) — all broken down by model and prompt version.
+</QA>
+<QA q="What's the difference between data drift and concept drift?">
+Data drift: the inputs' distribution changes. Concept drift: the relationship between inputs and the right answer changes. Data drift is visible immediately in the inputs; concept drift usually shows up only as falling performance once labels arrive.
+</QA>
+<QA q="Why add jitter to retries?">
+Without it, clients that failed together retry together, creating synchronised spikes that can overload a recovering service. Random jitter spreads the retries out.
+</QA>
+</Interview>
+
+<Takeaways>
+- Trace everything: LLM calls, tool calls, retrieval, cost and latency.
+- Monitor operations, cost, behaviour, quality and safety — plus drift for classical models and query patterns for LLM apps.
+- Reliability = retries with jitter, fallbacks, circuit breakers, validation, budgets, checkpoints, regression suites and SLOs with error budgets.
+</Takeaways>

@@ -1,0 +1,210 @@
+---
+summary: "A ready-to-use governance toolkit: an AI use-case intake and risk-scoring form with a worked example, a system card template, a DPIA checklist, a red-team plan, an AI incident report, a human-approval screen spec, a regulatory cheat sheet (DPDP, IT Rules, sector regulators, EU AI Act, GDPR, NIST, ISO), principles mapped to engineering controls, and a governance maturity checklist."
+---
+
+## Governance is concrete
+
+<Level l="advanced" />
+
+These templates are meant to be copied into your project repository and filled in for every model or agent you ship — including your portfolio projects. Interviewers notice when a project has a system card and a risk assessment.
+
+## Template 1 — AI use-case intake and risk assessment
+
+<Level l="advanced" />
+
+| Field | Your answer |
+|---|---|
+| Use-case name / owner | |
+| Business purpose and expected benefit | |
+| Users and affected people (including non-users affected by decisions) | |
+| Decision type: informs a person / recommends / decides automatically / takes actions | |
+| Data used (categories; personal data? sensitive? children's data?) | |
+| Models and providers; where data is processed (region) | |
+| Tools and actions available, with their permissions | |
+| Worst plausible failure and its impact (financial, legal, safety, reputational, individual harm) | |
+| Reversibility of actions | |
+| Regulatory context (DPDP, sector rules, EU AI Act tier if applicable) | |
+| **Impact (1–5) × Autonomy (1–5) = risk score** | |
+| Required controls for this tier | |
+| Approval (name, role, date) | |
+
+**Tiering guide:**
+
+- **Score ≤ 6 → low:** standard controls.
+- **7–14 → medium:** an evaluation report, human-on-the-loop, a monitoring dashboard, a quarterly review.
+- **≥ 15 → high:** a formal review board, a red-team report, human-in-the-loop for consequential actions, audit logging, a DPIA, an incident drill.
+
+<Example title="Worked example: scoring three use cases">
+- **Internal FAQ drafting assistant.** Impact 2 (a wrong draft is caught before publishing) × autonomy 1 (suggests only) = **2 → low.**
+- **Support agent that issues refunds up to ₹2,000.** Impact 3 × autonomy 4 = **12 → medium:** evaluation report, monitoring, a per-day refund cap, spot checks.
+- **Agent that changes employees' salaries in payroll.** Impact 5 × autonomy 4 = **20 → high:** human approval for every change, audit logging, a DPIA, a red-team report — or keep it suggestion-only, which drops autonomy to 2 and the score to 10.
+
+Lowering autonomy is often the cheapest control.
+</Example>
+
+## Template 2 — System card
+
+<Level l="advanced" />
+
+```markdown title="SYSTEM_CARD.md"
+# System Card: <name> v<version>
+
+## Overview
+Purpose, users, deployment context, owner, contact.
+
+## Architecture
+Models (name/version/provider), retrieval sources, tools and permissions, guardrails, human checkpoints.
+
+## Intended use / out-of-scope use
+
+## Data
+Sources for retrieval or fine-tuning, personal-data handling, retention, residency.
+
+## Evaluation
+Golden-set results (quality, faithfulness, refusal accuracy), adversarial / red-team results,
+fairness checks, latency and cost. Date and evaluation-set version.
+
+## Known limitations and risks
+
+## Monitoring
+Metrics, alerts, sampling for human review, feedback channels.
+
+## Change log
+Version history with evaluation deltas.
+```
+
+## Template 3 — Data protection impact assessment (DPIA) checklist
+
+<Level l="advanced" />
+
+- The purpose of processing personal data is specified and lawful (consent or another valid ground).
+- **Data minimisation:** only necessary fields are sent to models, stored in logs or indexed.
+- The notice to individuals describes AI processing in plain language.
+- Processors and sub-processors (LLM providers, vector-database hosts) have contracts covering data use, retention and training opt-out.
+- Data-residency and cross-border transfer requirements are checked.
+- Retention periods are defined for prompts, outputs, logs, embeddings and memory.
+- There are mechanisms for access, correction and erasure requests — **including vector indexes and agent memory**.
+- Security controls: encryption, access control, tenant isolation, secrets management.
+- Children's data: verifiable parental consent where required; no tracking or targeted advertising.
+- A breach-response process and notification timelines are documented.
+- Residual risks are accepted by an accountable owner.
+
+## Template 4 — Red-team plan
+
+<Level l="advanced" />
+
+| Item | Detail |
+|---|---|
+| Scope | System version, environments, tools enabled |
+| Threat actors | Curious users, malicious users, insiders, authors of external content (indirect injection) |
+| Harm categories | Data leakage, unauthorised actions, unsafe or toxic content, misinformation, bias, cost abuse |
+| Methods | Manual expert probing, automated attack generation, adversarial documents, multilingual attacks |
+| Success criteria | e.g. 0 critical findings open; ≥ 98% pass on the adversarial suite |
+| Reporting | Finding, reproduction steps, severity, recommended fix, owner, status |
+| Regression | Every finding is added to the CI adversarial suite |
+
+How to run it: [red-teaming](/learn/alignment-safety/deep-dive/).
+
+## Template 5 — AI incident report
+
+<Level l="advanced" />
+
+```markdown title="INCIDENT.md"
+# Incident <ID> — <one-line summary>
+Severity: SEV1/2/3 · Detected: <time, how> · Resolved: <time>
+
+## Impact
+Who or what was affected, number of requests/users, data involved.
+
+## Timeline
+
+## Root cause
+(e.g. a provider model update changed refusal behaviour; a prompt change removed a constraint;
+a poisoned document was ingested)
+
+## Mitigation and resolution
+
+## What went well / what didn't
+
+## Action items (owner, due date)
+New tests, alerts, guardrails, process changes.
+```
+
+The incident process itself is in [observability](/learn/observability/deep-dive/).
+
+## Template 6 — The human-approval screen
+
+<Level l="advanced" />
+
+An approval request shown to a reviewer should include:
+
+1. **The proposed action in plain language:** "Update the salary of employee E1043 from ₹14.2 L to ₹15.0 L."
+2. **A diff or preview** of exactly what will change.
+3. **Why:** the agent's rationale and the evidence it used (links to documents, query results).
+4. **Confidence and risk flags:** "The amount exceeds the 5% policy threshold."
+5. **Options:** approve, edit, reject (with a reason), escalate.
+6. **Audit:** the reviewer's identity and the time, recorded with the trace ID.
+
+Track override and rejection rates: very low rejection may mean rubber-stamping; very high rejection means the agent isn't performing.
+
+## Regulatory cheat sheet
+
+<Level l="advanced" />
+
+| Regulation / framework | Scope | Key obligations for AI teams |
+|---|---|---|
+| India — Digital Personal Data Protection Act, 2023, and Rules | Processing digital personal data | Notice and consent (or legitimate uses), purpose limitation, data minimisation, security safeguards, breach notification, data principals' rights (access, correction, erasure, grievance), extra duties for Significant Data Fiduciaries (DPIAs, audits), protections for children's data |
+| India — IT Rules and MeitY advisories | Intermediaries and platforms | Due diligence; labelling of synthetically generated content; preventing unlawful content |
+| India — sector regulators (RBI, SEBI, IRDAI) | Finance, securities, insurance | Model risk management, fairness, explainability for credit decisions, outsourcing and data-localisation rules |
+| EU AI Act | AI systems placed on the EU market or affecting people in the EU | Prohibited practices; for high-risk systems: risk management, data governance, technical documentation, logging, transparency, human oversight, accuracy, robustness, cybersecurity, conformity assessment; transparency duties for chatbots and deepfakes; obligations for general-purpose AI model providers |
+| GDPR (EU / UK) | Personal data | A lawful basis, DPIAs for high-risk processing, rights including not being subject to solely automated decisions with significant effects |
+| NIST AI RMF + Generative AI Profile | Voluntary (US origin, used globally) | Govern, Map, Measure, Manage |
+| ISO/IEC 42001 | A certifiable AI management system | Policies, roles, risk assessment, controls, continual improvement |
+| ISO/IEC 23894 | AI risk-management guidance | A risk process integrated with ISO 31000 |
+
+<Pitfall>
+**Regulations evolve quickly.** Treat this table as orientation, not legal advice. Rules and implementation timelines change; involve legal and compliance colleagues and check the current official texts before launching anything high-impact.
+</Pitfall>
+
+## Responsible-AI principles → engineering controls
+
+<Level l="advanced" />
+
+| Principle | Engineering control |
+|---|---|
+| Fairness | Subgroup evaluation, counterfactual tests, bias monitoring, human review of adverse decisions |
+| Transparency | AI disclosure, citations, explanations (SHAP, rationales), system cards |
+| Accountability | Named owners, approval workflows, audit logs, an incident process |
+| Privacy | Minimisation, redaction, retention limits, tenant isolation, consent tracking |
+| Safety and security | Guardrails, red-teaming, least privilege, sandboxing, kill switches |
+| Reliability | Evaluation suites, regression gates, monitoring, fallbacks |
+| Human agency | Human approval for consequential actions, easy escalation to people, the ability to contest decisions |
+
+## Governance maturity checklist
+
+<Level l="advanced" />
+
+- An inventory of all AI systems, with owners and risk tiers.
+- An approved list of models and providers, with their data-handling terms.
+- A standard intake and risk assessment for new use cases.
+- Evaluation and red-team requirements by tier.
+- System cards, maintained and versioned.
+- Monitoring dashboards and alerting standards.
+- An incident-response process, tested with drills.
+- Training for builders and users on responsible AI.
+- Periodic review and decommissioning of unused systems.
+
+<Interview>
+<QA q="What would you put in a system card?">
+Purpose and users, architecture (models, retrieval sources, tools and permissions, guardrails, human checkpoints), intended and out-of-scope uses, data handling, evaluation results with dates and versions, known limitations, monitoring, and a change log.
+</QA>
+<QA q="What does a DPIA need to cover for a RAG assistant?">
+A lawful purpose, minimisation, user notice, provider contracts (retention, no training), residency, retention for prompts, logs, embeddings and memory, erasure that reaches the vector index, security and tenant isolation, breach response, and sign-off on residual risk.
+</QA>
+</Interview>
+
+<Takeaways>
+- Governance is concrete: intake and risk forms, system cards, DPIAs, red-team plans, incident reports and approval-screen designs.
+- Map each principle to a control you can test and audit; lowering autonomy is often the cheapest control.
+- Know the main frameworks (DPDP, EU AI Act, NIST AI RMF, ISO/IEC 42001) and involve legal early for high-impact systems.
+</Takeaways>
