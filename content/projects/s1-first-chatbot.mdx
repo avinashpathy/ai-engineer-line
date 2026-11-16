@@ -1,0 +1,260 @@
+---
+order: 0.1
+code: S1
+starter: true
+title: Your First Chatbot
+tagline: A command-line chatbot that remembers the conversation, streams its replies word by word and shows what each message costs in tokens — your first real program that talks to an LLM.
+level: Beginner
+weeks: 1 evening
+lines: [l]
+stack: [Python, OpenAI-compatible API, Ollama or a hosted provider, python-dotenv]
+skills: [Calling an LLM API, System prompts, Conversation memory, Streaming, Tokens]
+---
+
+## What you'll build
+
+A chatbot you run in your terminal. You type a message, it answers word by word as the model writes, it remembers what you said earlier, and after each reply it shows how many **tokens** (pieces of words) the message used.
+
+```text title="what it looks like"
+Chatting with llama3.2. Type /reset to start over, /quit to leave.
+
+You: What is a token?
+Bot: A token is a small piece of text — often part of a word — that the model reads and writes...
+[tokens: 61 in + 84 out = 145 · session total 145]
+
+You: Give me an everyday example.
+Bot: Think of Lego bricks: words are built from a few standard pieces...
+[tokens: 160 in + 72 out = 232 · session total 377]
+```
+
+Every AI app you build later — RAG, agents, voice — starts with exactly this: send messages, get a reply back.
+
+<Note title="Before you start">
+- **Python 3.10 or newer** and a terminal. New to this? Do [Python for AI](/learn/python-backend/python-for-ai/) first.
+- **A model to talk to — free options work.** Either install [Ollama](https://ollama.com) and run `ollama pull llama3.2` (free, runs on your own computer, about 2 GB), or create a free API key with a hosted provider that offers an OpenAI-compatible API.
+- **The code:** download it from the [starters folder on GitHub](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters), or copy it from this page.
+- **Cost:** ₹0 with Ollama. A hosted provider's free tier is plenty for this project.
+- **Time:** 2–3 hours, including setup.
+</Note>
+
+### Set up (once)
+
+```bash title="terminal"
+cd starters/s1-first-chatbot
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                 # Windows: copy .env.example .env
+```
+
+Open `.env` and choose your provider. The defaults talk to Ollama on your own computer:
+
+| Provider | `LLM_BASE_URL` | `LLM_API_KEY` | `LLM_MODEL` |
+|---|---|---|---|
+| Ollama (free, local) | `http://localhost:11434/v1` | `ollama` | `llama3.2` |
+| A hosted provider | Its OpenAI-compatible URL (from its docs) | Your key | A model from its model list |
+
+<Pitfall>
+Never paste an API key into your code or commit `.env` to GitHub — the `.gitignore` in the starters folder already excludes it. If a key ever leaks, delete it in the provider's dashboard and create a new one.
+</Pitfall>
+
+
+## Step 1 — Run it
+
+```bash title="terminal"
+python chat.py
+```
+
+Ask it a few things, then ask a follow-up that only makes sense if it remembers ("give me another example"). Type `/reset` and ask the follow-up again — now it can't answer, because the memory is gone. That's the whole idea of conversation memory.
+
+## Step 2 — Read the code
+
+Here is the complete program. Read it top to bottom; the explanations follow.
+
+```python title="chat.py"
+"""Starter project S1 - your first chatbot.
+
+A command-line chatbot that remembers the conversation, streams its replies
+word by word, and shows how many tokens each message used.
+
+Run:  python chat.py
+"""
+import os
+import sys
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()  # reads settings from a .env file next to this script, if there is one
+
+# Any OpenAI-compatible provider works. The defaults use Ollama on your own computer (free).
+BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+API_KEY = os.getenv("LLM_API_KEY", "ollama")   # Ollama ignores the key, but the library needs one
+MODEL = os.getenv("LLM_MODEL", "llama3.2")
+
+SYSTEM_PROMPT = (
+    "You are a friendly study buddy for someone learning about AI. "
+    "Explain things simply, use short paragraphs, and give an everyday example when it helps. "
+    "If you are not sure about something, say so."
+)
+
+MAX_TURNS_KEPT = 10  # how many recent user/assistant pairs to send back to the model
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough fallback when the provider doesn't report usage: about 4 characters per token."""
+    return max(1, len(text) // 4)
+
+
+def trim_history(messages: list[dict], max_turns: int = MAX_TURNS_KEPT) -> list[dict]:
+    """Keep the system prompt plus the most recent turns, so long chats don't grow forever."""
+    system, rest = messages[:1], messages[1:]
+    return system + rest[-max_turns * 2:]
+
+
+def ask(client, messages: list[dict]) -> tuple[str, int, int]:
+    """Send the conversation, print the reply as it streams in, and return (reply, tokens_in, tokens_out)."""
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},   # ask for token counts at the end of the stream
+        temperature=0.7,
+        max_tokens=600,
+    )
+    parts, usage = [], None
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            piece = chunk.choices[0].delta.content
+            print(piece, end="", flush=True)
+            parts.append(piece)
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+    print()
+    reply = "".join(parts)
+    if usage:
+        return reply, usage.prompt_tokens, usage.completion_tokens
+    return reply, sum(estimate_tokens(m["content"]) for m in messages), estimate_tokens(reply)
+
+
+def main() -> None:
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    total = 0
+    print(f"Chatting with {MODEL}. Type /reset to start over, /quit to leave.\n")
+    while True:
+        try:
+            user = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not user:
+            continue
+        if user == "/quit":
+            break
+        if user == "/reset":
+            messages = messages[:1]
+            print("(conversation cleared)\n")
+            continue
+
+        messages.append({"role": "user", "content": user})
+        messages = trim_history(messages)
+        print("Bot: ", end="", flush=True)
+        try:
+            reply, tokens_in, tokens_out = ask(client, messages)
+        except Exception as e:  # network down, wrong model name, Ollama not running...
+            print(f"\n[error] {e}\nCheck the 'Stuck?' section of the project page.\n")
+            messages.pop()      # forget the question that failed
+            continue
+        messages.append({"role": "assistant", "content": reply})
+        total += tokens_in + tokens_out
+        print(f"[tokens: {tokens_in} in + {tokens_out} out = {tokens_in + tokens_out} · session total {total}]\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+**How it works, in order:**
+
+1. **Settings.** `load_dotenv()` reads your `.env`. The three settings say *where* the model is, *who you are* and *which* model to use. Because Ollama, OpenAI and many other providers speak the same "OpenAI-compatible" language, the same code works with all of them.
+2. **The system prompt** is standing instructions the user doesn't see. It sets the bot's role and style ([system prompts](/learn/prompt-engineering/core/)).
+3. **Memory is just a list.** `messages` holds every turn. Each call sends the *whole* list — the model itself remembers nothing between calls.
+4. **`trim_history`** keeps only the last 10 exchanges, so a long chat doesn't get slower and more expensive forever ([context engineering](/learn/context-engineering/core/)).
+5. **Streaming.** `stream=True` returns the reply in small pieces as it's generated. Printing each piece with `flush=True` makes words appear live.
+6. **Tokens.** The last streamed chunk carries the token counts. If a provider doesn't send them, the code estimates about 4 characters per token. Tokens are how you're charged and what limits how much a model can read ([tokens](/learn/transformers/text-and-embeddings/)).
+7. **Errors don't crash it.** If the call fails, it prints the problem and forgets the failed question, so you can try again.
+
+## Step 3 — Run the tests
+
+```bash title="terminal"
+python -m pytest -q
+```
+
+The tests use a fake model, so they're free and instant. They check that memory trimming keeps the right messages and that streaming and token counting work.
+
+```python title="test_chat.py"
+"""Tests that run without any model: python -m pytest -q"""
+from types import SimpleNamespace
+
+import chat
+
+
+def test_trim_history_keeps_system_prompt_and_recent_turns():
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(30):
+        msgs += [{"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": f"a{i}"}]
+    trimmed = chat.trim_history(msgs, max_turns=3)
+    assert trimmed[0]["content"] == "sys"
+    assert [m["content"] for m in trimmed[1:]] == ["q27", "a27", "q28", "a28", "q29", "a29"]
+
+
+def test_ask_streams_and_reports_usage(capsys):
+    chunks = [
+        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Hel"))], usage=None),
+        SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="lo!"))], usage=None),
+        SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3)),
+    ]
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: iter(chunks))))
+    reply, tin, tout = chat.ask(fake, [{"role": "user", "content": "hi"}])
+    assert reply == "Hello!" and (tin, tout) == (12, 3)
+    assert "Hello!" in capsys.readouterr().out
+
+
+def test_ask_estimates_when_usage_missing():
+    chunks = [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="x" * 40))], usage=None)]
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: iter(chunks))))
+    _, tin, tout = chat.ask(fake, [{"role": "user", "content": "y" * 80}])
+    assert (tin, tout) == (20, 10)
+```
+
+## Step 4 — Make it yours
+
+Try each change, run it, and notice what happens:
+
+1. **Change the personality.** Rewrite `SYSTEM_PROMPT` so the bot is a strict interview coach. How much does one paragraph change the answers?
+2. **Temperature.** Set `temperature=0` and ask the same question three times; then try `1.2`. Lower is more predictable, higher is more varied ([temperature](/learn/how-llms-work/core/)).
+3. **A cost counter.** Look up your provider's price per million input and output tokens and print the running cost in rupees next to the token count.
+4. **JSON mode.** Add a `/json` command that asks for the answer as JSON with `"answer"` and `"confidence"` keys, then parse it with `json.loads`. What happens when the model adds extra text? (The fix is in [LLM APIs](/learn/llm-apis/core/).)
+5. **Save the chat.** Write `messages` to a file on `/quit` and load it on start, so the bot remembers you between runs.
+
+## Stuck?
+
+| What you see | What it means | Fix |
+|---|---|---|
+| `Connection error` / `Connection refused` | Nothing is answering at `LLM_BASE_URL` | Start Ollama (open the app, or run `ollama serve`), or check the URL in `.env` |
+| `model "…" not found` / `404` | The model name doesn't exist on your provider | Run `ollama list` (or check the provider's model list) and copy the exact name into `LLM_MODEL` |
+| `401 Unauthorized` / `invalid api key` | The key is wrong or missing | Copy the key again into `.env`, with no quotes or spaces; make sure the file is called `.env` |
+| `429 Too Many Requests` | You hit the free tier's rate limit | Wait a minute and try again |
+| `ModuleNotFoundError` | The packages aren't installed in the active environment | Activate `.venv` again and re-run `pip install -r requirements.txt` |
+| Replies are very slow | A local model is running on a laptop CPU | Use a smaller model, or a hosted provider |
+| The bot forgets things from long ago | `trim_history` dropped them on purpose | Raise `MAX_TURNS_KEPT`, and watch the token count grow |
+
+Still stuck? Run the tests (`python -m pytest -q`) — they check your files without needing a model, so a failure points at the code rather than your setup.
+
+
+## What you learned
+
+- An LLM API call is just a list of messages in, a reply out. Memory is your code re-sending the history.
+- Streaming makes apps feel fast; tokens are what you pay for and what fills the context window.
+- **Next:** [Starter S2 · Ask Your Document](/projects/s2-ask-a-pdf/), then the lesson [LLM APIs like a professional](/learn/llm-apis/core/).

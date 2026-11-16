@@ -1,0 +1,10 @@
+mcp[cli]
+httpx
+pydantic
+pyyaml
+langgraph
+langchain-mcp-adapters
+langchain-openai
+python-dotenv
+pytest
+anyio

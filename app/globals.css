@@ -358,3 +358,19 @@ details.qa > div p{margin:.4em 0}
 details.qa.solution{border:1px solid var(--rule);border-radius:10px;padding:10px 14px;margin:12px 0 22px}
 details.qa.solution summary{font-size:.92em}
 details.qa.solution[open]{background:color-mix(in srgb,var(--rule) 12%,transparent)}
+
+/* "In plain English" callout */
+.callout.plain{--k:#0F7C7A}
+.callout.plain > .cb{font-size:1.04em}
+/* glossary hover terms */
+.term{border-bottom:1.5px dotted currentColor;cursor:help;position:relative}
+.term:focus{outline:2px solid var(--ink);outline-offset:2px}
+.term .term-tip{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.term:hover .term-tip,.term:focus .term-tip{left:0;bottom:calc(100% + 6px);width:max-content;max-width:min(300px,70vw);height:auto;overflow:visible;clip-path:none;white-space:normal;background:var(--ink);color:#fff;font-size:.85rem;line-height:1.45;font-weight:400;font-style:normal;padding:8px 10px;border-radius:6px;z-index:40;box-shadow:0 4px 14px rgba(0,0,0,.25);text-transform:none;letter-spacing:normal}
+/* optional-on-first-read marker */
+.optional-tag{display:inline-block;margin-left:6px;padding:1px 7px;border:1.5px dashed currentColor;border-radius:999px;font-family:var(--mono);font-size:.72rem;letter-spacing:.03em;opacity:.85}
+.proj-group{margin:8px 0 18px}
+.proj-group h2{margin:0 0 4px}
+@media (max-width:900px){
+  .term:hover .term-tip,.term:focus .term-tip{position:fixed;left:12px;right:12px;bottom:12px;top:auto;width:auto;max-width:none;font-size:.95rem}
+}

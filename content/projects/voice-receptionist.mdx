@@ -15,10 +15,6 @@ skills: [Speech AI, Streaming pipelines, Latency budgeting, Turn-taking and barg
 
 Voice is where AI engineering gets physical: every 100 ms of delay is audible. This project proves you can design **streaming systems against a latency budget**.
 
-<Note title="Before you start">
-Finish [Multimodal & voice AI](/learn/multimodal-voice/), [LLM APIs](/learn/llm-apis/) and [Agent foundations](/learn/agent-foundations/). Time: 15–20 hours.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -28,6 +24,21 @@ Finish [Multimodal & voice AI](/learn/multimodal-voice/), [LLM APIs](/learn/llm-
 | Word error rate on clinic vocabulary | ≤ 10% |
 | Bookings made without read-back confirmation | 0 |
 | Barge-in: agent stops talking when interrupted | ≤ 300 ms |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [Voice AI](/learn/multimodal-voice/voice/), [LLM APIs](/learn/llm-apis/core/) and [Agent foundations](/learn/agent-foundations/core/). |
+| **Accounts and keys** | Speech-to-text and text-to-speech (a managed service, or local Whisper and an open TTS model), an LLM API key, and a telephony account (such as Twilio) if you want real phone calls. |
+| **Hardware** | A laptop with a microphone. Local Whisper is much faster with a GPU. |
+| **Expected cost** | Roughly ₹500–2,000 for speech services and a phone number during development; browser-only testing avoids telephony costs. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2–3 weeks part-time (15–20 hours) |
+| **Starter files** | The [voice-receptionist scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/voice-receptionist) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -159,6 +170,20 @@ Run the media gateway and agent as one container on a host close to your callers
 - A speech-to-speech model and a latency comparison against your cascaded pipeline.
 - WhatsApp or SMS confirmations after booking.
 - Combine with [Project 05](/projects/support-chatbot/) as a voice channel.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Long silences before the bot speaks | Waiting for the full reply before speaking | Stream: speak the first sentence while the rest is still generating, and use short fillers while tools run |
+| The bot talks over the caller | No barge-in handling | Stop TTS playback as soon as voice activity is detected |
+| Names and dates are misheard | Speech recognition errors on proper nouns | Read details back for confirmation, and add the clinic's doctor names as recognition hints |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

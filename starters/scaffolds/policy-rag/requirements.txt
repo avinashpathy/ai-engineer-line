@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+pydantic
+langchain
+langchain-community
+langchain-qdrant
+qdrant-client
+sentence-transformers
+rank-bm25
+pymupdf4llm
+ragas
+langfuse
+redis
+python-dotenv
+pytest
+httpx

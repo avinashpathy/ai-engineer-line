@@ -50,7 +50,10 @@ export function stationReady(id: string) {
 export interface ProjectMeta {
   slug: string; order: number; title: string; tagline: string; level: string; weeks: string;
   lines: string[]; stack: string[]; skills: string[];
+  code?: string; starter?: boolean;   // starter projects show "S1" instead of a number
 }
+/** "S1" for starter projects, otherwise the zero-padded number: "04". */
+export const projectLabel = (p: { order: number; code?: string }) => p.code ?? String(p.order).padStart(2, "0");
 export function projects(): ProjectMeta[] {
   const dir = path.join(ROOT, "projects");
   if (!fs.existsSync(dir)) return [];

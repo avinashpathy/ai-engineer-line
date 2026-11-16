@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { LINES, STATIONS, ALL_LESSONS, stationsOn } from "@/lib/curriculum";
-import { availableLessonKeys, projects } from "@/lib/content";
+import { availableLessonKeys, projectLabel, projects } from "@/lib/content";
 import { DepartureBoard, LinesDiagram } from "@/components/progress-ui";
 
 export default function Home() {
   const ready = availableLessonKeys();
-  const projs = projects();
+  const all = projects();
+  const projs = all.filter(p => !p.starter);
+  const starters = all.filter(p => p.starter);
   return (
     <>
       <div className="wrap">
@@ -61,11 +63,11 @@ export default function Home() {
 
       {projs.length > 0 && (
         <section className="sec"><div className="wrap">
-          <div className="sec-head"><h2>Build real things</h2><p>Each project ships with an architecture, a step-by-step build, evaluation, security and deployment. <Link href="/projects/">All projects →</Link></p></div>
+          <div className="sec-head"><h2>Build real things</h2><p>Each project ships with an architecture, a step-by-step build, evaluation, security and deployment.{starters.length > 0 && <> New to AI? Begin with the {starters.length} <Link href="/projects/#starter">starter projects</Link>, which come with complete code.</>} <Link href="/projects/">All projects →</Link></p></div>
           <div className="proj-grid">
             {projs.slice(0, 3).map(p => (
               <Link key={p.slug} className="proj panel" href={`/projects/${p.slug}/`}>
-                <div className="ph"><span className="no">{String(p.order).padStart(2, "0")}</span><span className="mono">{p.level} · {p.weeks}</span></div>
+                <div className="ph"><span className="no">{projectLabel(p)}</span><span className="mono">{p.level} · {p.weeks}</span></div>
                 <div className="pb"><h3>{p.title}</h3><p>{p.tagline}</p></div>
               </Link>
             ))}

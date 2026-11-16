@@ -1,0 +1,11 @@
+langgraph
+langchain-openai
+httpx
+trafilatura
+rapidfuzz
+fastapi
+uvicorn
+sse-starlette
+streamlit
+python-dotenv
+pytest

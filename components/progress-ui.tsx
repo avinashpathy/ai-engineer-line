@@ -40,6 +40,7 @@ export function StationStops({ station, ready }: { station: string; ready: Recor
               <span className="mono" style={{ color: "inherit", opacity: .75 }}>{l.minutes} min</span>
               {done.has(key) && <span className="mono">✓ done</span>}
               {!ready[l.slug] && <span className="mono">coming soon</span>}
+              {l.slug === "deep-dive" && <span className="optional-tag">optional on first read</span>}
             </div>
             {ready[l.slug] && <span className="go" aria-hidden="true">→</span>}
           </>

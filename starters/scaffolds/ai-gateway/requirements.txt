@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+litellm
+redis
+asyncpg
+sentence-transformers
+numpy
+prometheus-client
+pyyaml
+python-dotenv
+pytest
+httpx

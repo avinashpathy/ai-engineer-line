@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+transformers
+peft
+trl
+datasets
+accelerate
+bitsandbytes
+gradio
+python-dotenv
+pytest
+httpx

@@ -1,6 +1,6 @@
 import type { LineId } from "./curriculum";
 
-export interface Phase { id: string; weeks: string; title: string; line: LineId; stations: string[]; goal: string; build: string; project?: string; optional?: boolean }
+export interface Phase { id: string; weeks: string; title: string; line: LineId; stations: string[]; goal: string; build: string; project?: string; starter?: string; optional?: boolean }
 
 export const PHASES: Phase[] = [
   { id: "prelude", weeks: "Weeks −12 to 0", title: "Programming prelude", line: "f", optional: true,
@@ -14,7 +14,7 @@ export const PHASES: Phase[] = [
   { id: "p2", weeks: "Weeks 3–6", title: "LLM engineering core", line: "l",
     stations: ["how-llms-work", "llm-apis", "prompt-engineering", "context-engineering", "full-stack-apps"],
     goal: "Call models like a professional: streaming, structured output, tools, retries and cost control. Write prompts you can test, and manage what the model sees.",
-    build: "A production LLM client with retries, streaming and a live token-and-cost counter, then a full-stack app on top of it.", project: "resume-jd-matcher" },
+    build: "A production LLM client with retries, streaming and a live token-and-cost counter, then a full-stack app on top of it.", project: "resume-jd-matcher", starter: "s1-first-chatbot" },
   { id: "p3", weeks: "Weeks 7–8", title: "Adapt, extend & secure", line: "l",
     stations: ["generative-ai", "fine-tuning", "multimodal-voice", "choosing-models", "alignment-safety"],
     goal: "Know when and how to fine-tune with LoRA/QLoRA, work with images, documents and audio, compare models on your own task, and defend against prompt injection.",
@@ -22,11 +22,11 @@ export const PHASES: Phase[] = [
   { id: "p4", weeks: "Weeks 9–13", title: "Retrieval-augmented generation", line: "r",
     stations: ["rag-foundations", "rag-orchestration", "advanced-rag", "evaluation", "production-rag"],
     goal: "Search your own documents and answer with citations. Add hybrid search and re-ranking, then measure retrieval and answers with a golden set.",
-    build: "A RAG system over a real document set, with an evaluation report that shows each improvement in numbers.", project: "policy-rag" },
+    build: "A RAG system over a real document set, with an evaluation report that shows each improvement in numbers.", project: "policy-rag", starter: "s2-ask-a-pdf" },
   { id: "p5", weeks: "Weeks 14–18", title: "Agents & tools", line: "a",
     stations: ["agent-foundations", "agent-patterns", "mcp", "langgraph", "computer-use-agents"],
     goal: "Build agents that call tools, plan, recover from errors and stop for human approval. Expose your own APIs as MCP tools.",
-    build: "An MCP server generated from an OpenAPI spec, used by a LangGraph agent with a human-approval step.", project: "openapi-mcp-server" },
+    build: "An MCP server generated from an OpenAPI spec, used by a LangGraph agent with a human-approval step.", project: "openapi-mcp-server", starter: "s3-first-agent" },
   { id: "p6", weeks: "Weeks 19–22", title: "Production & LLMOps", line: "p",
     stations: ["deployment-cicd", "observability", "cloud-llmops", "governance"],
     goal: "Ship and operate: containers, CI/CD with evaluation gates, tracing, cost dashboards, cloud deployment and governance.",

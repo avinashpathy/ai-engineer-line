@@ -15,10 +15,6 @@ skills: [RAG + tool calling, Intent routing, Conversation state, Confirmation fl
 
 The skill this project proves: combining RAG and tools safely, and evaluating a multi-turn system with **simulated customers**.
 
-<Note title="Before you start">
-Do [Project 04](/projects/policy-rag/) or finish the [R line](/learn/rag-foundations/), plus [Agent foundations](/learn/agent-foundations/). Time: 12–15 hours for the core.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -28,6 +24,21 @@ Do [Project 04](/projects/policy-rag/) or finish the [R line](/learn/rag-foundat
 | Returns created on someone else's order | 0 |
 | Escalation precision / recall | ≥ 0.85 / ≥ 0.90 |
 | Policy answer faithfulness | ≥ 0.90 |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [Project 04](/projects/policy-rag/) or the [RAG line](/learn/rag-foundations/core/), plus [Agent foundations](/learn/agent-foundations/core/) and [Full-stack LLM apps](/learn/full-stack-apps/core/). |
+| **Accounts and keys** | An LLM API key or Ollama. Docker Desktop. |
+| **Hardware** | Any laptop. |
+| **Expected cost** | Roughly ₹300–1,000 of API usage while developing and testing. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2–3 weeks part-time (12–15 hours for the core) |
+| **Starter files** | The [support-chatbot scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/support-chatbot) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -198,6 +209,20 @@ Docker Compose locally; then deploy the API and UI to a container service with m
 - A live-agent console that shows the AI summary and suggested replies.
 - Proactive notifications ("your order is delayed") from a webhook-driven workflow.
 - A/B test two prompt versions on simulated users.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Streaming arrives all at once | A proxy or the client is buffering | Disable buffering (`X-Accel-Buffering: no`), and read the SSE stream incrementally in the UI |
+| The bot never hands off to a person | Hand-off rules are too strict or the classifier misses frustration | Add explicit triggers (asks for a human, repeated failure, sensitive topics) and test each one |
+| pgvector extension not found | The database image lacks the extension | Use the `pgvector/pgvector` Docker image and run `CREATE EXTENSION vector` |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

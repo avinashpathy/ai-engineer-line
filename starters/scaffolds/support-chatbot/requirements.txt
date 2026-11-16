@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+openai
+asyncpg
+pgvector
+redis
+sse-starlette
+langfuse
+streamlit
+python-dotenv
+pytest
+httpx

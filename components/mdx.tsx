@@ -12,8 +12,9 @@ const ICONS: Record<string, ReactNode> = {
   interview: <path d="M4 5h16v11H9l-5 4V5Z" fill="none" stroke="currentColor" strokeWidth="2.2" />,
   takeaways: <path d="M6 3h12v18l-6-4-6 4V3Z" fill="currentColor" />,
   note: <path d="M12 4v10m0 3v2" fill="none" stroke="currentColor" strokeWidth="3" />,
+  plain: <path d="M4 6h16M4 12h11M4 18h7" fill="none" stroke="currentColor" strokeWidth="2.6" />,
 };
-const LABEL: Record<string, string> = { analogy: "Analogy", example: "Worked example", tip: "Pro tip", pitfall: "Common pitfall", interview: "Interview check", takeaways: "Key takeaways", note: "Note" };
+const LABEL: Record<string, string> = { analogy: "Analogy", example: "Worked example", tip: "Pro tip", pitfall: "Common pitfall", interview: "Interview check", takeaways: "Key takeaways", note: "Note", plain: "In plain English" };
 
 function Callout({ kind, title, children }: P & { kind: string }) {
   return (
@@ -32,6 +33,9 @@ export const mdxComponents = {
   Pitfall: (p: P) => <Callout kind="pitfall" {...p} />,
   Note: (p: P) => <Callout kind="note" {...p} />,
   Takeaways: (p: P) => <Callout kind="takeaways" {...p} />,
+  PlainEnglish: (p: P) => <Callout kind="plain" {...p} />,
+  // Glossary terms are wrapped automatically by remarkGlossary (lib/mdx.tsx): hover or focus shows the definition.
+  Term: ({ d, children }: { d: string; children?: ReactNode }) => <span className="term" tabIndex={0}>{children}<span className="term-tip" role="tooltip">{d}</span></span>,
   Interview: (p: P) => <Callout kind="interview" {...p} />,
   QA: ({ q, children }: { q: string; children?: ReactNode }) => <details className="qa"><summary>{q}</summary><div>{children}</div></details>,
   Solution: ({ children }: { children?: ReactNode }) => <details className="qa solution"><summary>Show solution</summary><div>{children}</div></details>,

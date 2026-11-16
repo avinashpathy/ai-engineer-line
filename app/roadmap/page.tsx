@@ -1,8 +1,9 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { stationById, lineOf } from "@/lib/curriculum";
+import { lessonExists } from "@/lib/content";
 import { PHASES } from "@/lib/roadmap";
-import { projects } from "@/lib/content";
+import { projectLabel, projects } from "@/lib/content";
 
 export const metadata: Metadata = { title: "Roadmap", description: "A 26-week roadmap to becoming an AI Engineer, phase by phase, with what to build after each one." };
 
@@ -20,6 +21,14 @@ export default function Roadmap() {
         <span><b>Measure from Phase 4 on.</b> Once you know evals, test every prompt or model change before it goes live.</span>
       </div>
 
+      <div className="panel first-time" id="first-time" style={{ padding: "16px 20px", marginBottom: 28, display: "grid", gap: 8, borderStyle: "dashed" }}>
+        <b className="disp" style={{ fontSize: "1.4rem" }}>New to AI? Your first time through</b>
+        <span><b>1. Read the core lessons, skip the deep dives.</b> Lessons marked <span className="optional-tag">optional on first read</span> go further than you need at first. Come back to them after your first portfolio project.</span>
+        <span><b>2. Start every lesson with its &ldquo;In plain English&rdquo; box,</b> and hover over (or tap) any <span className="term" tabIndex={0}>dotted word<span className="term-tip" role="tooltip">Like this: a short definition from the glossary.</span></span> to see what it means.</span>
+        <span><b>3. Build the three starter projects</b> — <Link href="/projects/s1-first-chatbot/">S1</Link> after LLM APIs, <Link href="/projects/s2-ask-a-pdf/">S2</Link> after RAG foundations and <Link href="/projects/s3-first-agent/">S3</Link> after Agent foundations. Each comes with complete code you can run.</span>
+        <span><b>4. Then pick one portfolio project</b> per phase, using its &ldquo;Before you start&rdquo; and &ldquo;Stuck?&rdquo; sections.</span>
+      </div>
+
       <div className="phases">
         {PHASES.map((ph, i) => (
           <div key={ph.id} className="phase" data-line={ph.line}>
@@ -30,8 +39,9 @@ export default function Roadmap() {
               <p className="mono" style={{ margin: "6px 0 0" }}>{ph.weeks}</p>
               <p>{ph.goal}</p>
               <div className="tags">{ph.stations.map(s => <Link key={s} className="tag" href={`/learn/${s}/`}>{stationById(s)!.title}</Link>)}</div>
-              <div className="build"><b>Build</b>{ph.build}
-                {ph.project && projs[ph.project] && <> Then take on <Link href={`/projects/${ph.project}/`} style={{ color: "var(--board-text)" }}>Project {String(projs[ph.project].order).padStart(2, "0")}: {projs[ph.project].title}</Link>.</>}
+              {(() => { const n = ph.stations.filter(s => lessonExists(s, "deep-dive")).length; return n > 0 ? <p className="mono" style={{ margin: "8px 0 0" }}>First time? Skip the {n} deep dive{n > 1 ? "s" : ""} in this phase and come back later.</p> : null; })()}
+              <div className="build"><b>Build</b>{ph.starter && projs[ph.starter] && <>New to AI? Start with <Link href={`/projects/${ph.starter}/`} style={{ color: "var(--board-text)" }}>Starter {projectLabel(projs[ph.starter])}: {projs[ph.starter].title}</Link>. </>}{ph.build}
+                {ph.project && projs[ph.project] && <> Then take on <Link href={`/projects/${ph.project}/`} style={{ color: "var(--board-text)" }}>Project {projectLabel(projs[ph.project])}: {projs[ph.project].title}</Link>.</>}
               </div>
             </div>
           </div>

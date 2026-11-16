@@ -29,6 +29,8 @@ export default async function LessonPage({ params }: Params) {
   const { source, data, headings } = readLesson(station, lesson);
   const content = await renderMDX(source);
   const line = lineOf(s.line);
+  // Deep dives go beyond what a first pass needs; beginners can skip them and come back later.
+  const optional = l.slug === "deep-dive";
   const ready = new Set(availableLessonKeys());
   const seq = ALL_LESSONS.filter(x => ready.has(x.key));
   const i = seq.findIndex(x => x.key === l.key);
@@ -44,13 +46,22 @@ export default async function LessonPage({ params }: Params) {
             <div><span>Level</span><b>{LEVEL_LABEL[l.level]}</b></div>
             <div><span>Reading</span><b>{l.minutes} min</b></div>
             <div><span>Lesson</span><b>{s.lessons.findIndex(x => x.slug === l.slug) + 1} of {s.lessons.length}</b></div>
+            {optional && <div><span>First read</span><b>Optional</b></div>}
           </div>
         </div>
       </section>
       <div className="wrap">
         <div className="lesson-body">
           <div>
-            <article className="prose">{content}</article>
+            <article className="prose">
+              {optional && (
+                <aside className="callout note" aria-label="Optional on first read">
+                  <div className="ch">Optional on first read</div>
+                  <div className="cb"><p>This deep dive goes further than you need the first time through. If you&apos;re new to AI, finish the core lesson{s.lessons[0]?.slug !== l.slug && <> (<Link href={`/learn/${s.id}/${s.lessons[0].slug}/`}>{s.lessons[0].title}</Link>)</>}, carry on along the line, and come back here once you&apos;ve built something.</p></div>
+                </aside>
+              )}
+              {content}
+            </article>
             <LessonComplete lessonKey={l.key} />
           </div>
           <aside className="side">

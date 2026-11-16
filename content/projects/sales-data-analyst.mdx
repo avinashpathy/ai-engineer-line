@@ -15,10 +15,6 @@ A containerised, versioned, monitored API. Users ask questions like *"Which regi
 
 This is the project that shows you can take an agent **all the way to production**.
 
-<Note title="Before you start">
-Finish [Agent foundations](/learn/agent-foundations/), [LangGraph](/learn/langgraph/) and [Deployment & CI/CD](/learn/deployment-cicd/). Time: 14–18 hours.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -28,6 +24,21 @@ Finish [Agent foundations](/learn/agent-foundations/), [LangGraph](/learn/langgr
 | p95 latency | ≤ 20 s |
 | Error rate | under 2% |
 | Every request traced with version and request ID | 100% |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [Agent foundations](/learn/agent-foundations/core/), [LangGraph](/learn/langgraph/core/), [text-to-SQL](/learn/advanced-rag/deep-dive/) and [Deployment & CI/CD](/learn/deployment-cicd/core/). [Starter S3](/projects/s3-first-agent/) is the small version of this agent. |
+| **Accounts and keys** | An LLM API key. Docker Desktop. A GitHub account for CI, and a cloud account (Google Cloud, Azure or AWS) for deployment — all have free tiers. |
+| **Hardware** | Any laptop. |
+| **Expected cost** | Roughly ₹500–1,500 of API usage including CI eval runs; the cloud free tier covers a small deployment. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2–3 weeks part-time (14–18 hours) |
+| **Starter files** | The [sales-data-analyst scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/sales-data-analyst) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -239,6 +250,20 @@ Aim for 30+ cases: factual questions with known answers, multi-step comparisons,
 - Expose the tools as an MCP server so any MCP client can use them.
 - A semantic cache for repeated questions.
 - A weekly scheduled job that re-runs the eval suite against the live deployment.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| The agent writes SQL with wrong column names | It didn't look at the schema | Make `get_schema` the first step and say so in the tool description |
+| `permission denied` running SQL | The read-only role is working | Good — the agent must only read. Check the query is a SELECT on allowed tables |
+| CI eval step fails only in GitHub Actions | Secrets or the test database aren't available there | Add the API key as a repository secret and seed the Postgres service container in the workflow |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

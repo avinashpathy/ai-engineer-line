@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { projects, readProject } from "@/lib/content";
+import { projectLabel, projects, readProject } from "@/lib/content";
 import { renderMDX } from "@/lib/mdx";
 import { lineOf, type LineId } from "@/lib/curriculum";
 import { Toc } from "@/components/Toc";
@@ -28,7 +28,7 @@ export default async function ProjectPage({ params }: Params) {
     <div data-line={main}>
       <section className="sign" style={{ background: "var(--ink)", color: "#fff" }}>
         <div className="wrap">
-          <div className="crumbs mono"><Link href="/projects/">All projects</Link><span>/</span><span>Project {String(meta.order).padStart(2, "0")}</span></div>
+          <div className="crumbs mono"><Link href="/projects/">All projects</Link><span>/</span><span>{meta.starter ? "Starter project" : "Project"} {projectLabel(meta)}</span></div>
           <h1>{meta.title}</h1>
           <p className="blurb">{meta.tagline}</p>
           <div className="stats">
@@ -48,8 +48,8 @@ export default async function ProjectPage({ params }: Params) {
           </aside>
         </div>
         <nav className="pager" aria-label="Previous and next project">
-          {prev ? <Link className="panel" href={`/projects/${prev.slug}/`}><span className="mono">← Project {String(prev.order).padStart(2, "0")}</span><b>{prev.title}</b></Link> : <span />}
-          {next && <Link className="panel next" href={`/projects/${next.slug}/`}><span className="mono">Project {String(next.order).padStart(2, "0")} →</span><b>{next.title}</b></Link>}
+          {prev ? <Link className="panel" href={`/projects/${prev.slug}/`}><span className="mono">← {prev.starter ? "Starter" : "Project"} {projectLabel(prev)}</span><b>{prev.title}</b></Link> : <span />}
+          {next && <Link className="panel next" href={`/projects/${next.slug}/`}><span className="mono">{next.starter ? "Starter" : "Project"} {projectLabel(next)} →</span><b>{next.title}</b></Link>}
         </nav>
       </div>
     </div>

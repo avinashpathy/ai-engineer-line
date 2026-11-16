@@ -29,6 +29,21 @@ The deliverable that sets it apart is an **evaluation report**: a table showing 
 | Unauthorised documents retrieved | 0 |
 | p95 latency (non-streaming) | ≤ 4 s |
 
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | The [RAG line](/learn/rag-foundations/core/) through [Evaluation](/learn/evaluation/core/). [Starter S2](/projects/s2-ask-a-pdf/) is the small version of this project — do it first. |
+| **Accounts and keys** | An LLM API key or Ollama. Docker Desktop. Optionally a free Langfuse account (or run it locally). |
+| **Hardware** | Any laptop; the re-ranker is faster with a GPU but fine on CPU for a small corpus. |
+| **Expected cost** | Roughly ₹300–1,000 of API usage including evaluation runs, or ₹0 with a local model. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2–3 weeks part-time (12–15 hours for the core) |
+| **Starter files** | The [policy-rag scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/policy-rag) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
+
 ## Architecture
 
 ```mermaid caption="Ingestion runs offline. At query time, access control filters candidates before anything reaches the model, and every step is traced."
@@ -293,6 +308,20 @@ Run Qdrant as a managed service or a private container, the API on a container p
 - HyDE query expansion, measured against the baseline.
 - Incremental re-ingestion when a PDF changes (hash comparison).
 - A chat UI with clickable citations that open the PDF at the right page.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| `Connection refused` to Qdrant | The container isn't running | `docker compose up -d qdrant`, then check http://localhost:6333/dashboard |
+| Evaluation scores barely change after your improvement | Golden set too small or too easy | Add harder and unanswerable questions; compare per question, not just averages |
+| A user sees a document they shouldn't | The access filter isn't applied inside the search | Build the filter from the verified user's groups and pass it to every retriever query — then add the automated test |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 
