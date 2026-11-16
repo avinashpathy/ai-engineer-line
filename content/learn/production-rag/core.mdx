@@ -1,0 +1,392 @@
+---
+summary: "Turning a demo into a production RAG system: incremental, idempotent ingestion with change detection and deletion sync, event-driven pipelines, embedding at scale and blue-green re-indexing, multi-tenancy patterns, corrective agentic RAG in LangGraph, query routing across sources, GraphRAG with Neo4j (graph + vector retrieval, safe text-to-Cypher), managed services (Bedrock Knowledge Bases, Azure AI Search) and performance engineering."
+---
+
+## From demo to production
+
+<Level l="advanced" />
+
+A demo RAG app indexes a folder once. A production system **ingests continuously** from many sources, **respects permissions**, survives failures, **adapts its retrieval strategy** per question, and often runs on managed cloud services. This lesson covers that gap.
+
+```mermaid caption="Production ingestion: react to changes, process only what changed, and send failures to a dead-letter queue instead of losing them."
+flowchart TD
+  SRC[Sources<br/>S3 · SharePoint · Confluence · DB] -- change events --> Q[[Queue]]
+  Q --> W[Idempotent worker]
+  W --> H{Content hash<br/>changed?}
+  H -- no --> SKIP[Skip]
+  H -- yes --> P[Parse · clean · enrich] --> C[Chunk + contextual headers]
+  C --> E[Embed in batches<br/>cache by hash] --> U[(Upsert index<br/>delete stale chunks)]
+  W -- error --> DLQ[[Dead-letter queue + dashboard]]
+  SRC -- ACL / delete events --> W
+```
+
+## The ingestion pipeline as a real system
+
+<Level l="advanced" />
+
+### Change detection and incremental updates
+
+Re-embedding everything nightly is wasteful and slow. Track a content hash per document and process only what changed.
+
+```python title="sync.py"
+import hashlib, json, sqlite3
+
+db = sqlite3.connect("ingest_state.db")
+db.execute("CREATE TABLE IF NOT EXISTS docs (doc_id TEXT PRIMARY KEY, sha256 TEXT, version INT, chunk_ids TEXT)")
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+def sync_document(doc_id, text, metadata, index):
+    row = db.execute("SELECT sha256, version, chunk_ids FROM docs WHERE doc_id = ?", (doc_id,)).fetchone()
+    h = sha(text + json.dumps(metadata.get("acl", []), sort_keys=True))   # ACL changes count as changes
+    if row and row[0] == h:
+        return "unchanged"
+    if row:
+        index.delete(ids=json.loads(row[2]))                 # remove stale chunks first
+    chunks = chunk_with_headers(text, metadata)               # structure-aware + contextual headers
+    version = (row[1] + 1) if row else 1
+    ids = [f"{doc_id}:v{version}:{i}" for i in range(len(chunks))]   # deterministic IDs = safe retries
+    index.upsert(ids=ids, texts=[c["text"] for c in chunks],
+                 metadatas=[{**c["meta"], "doc_id": doc_id, "version": version} for c in chunks])
+    db.execute("REPLACE INTO docs VALUES (?, ?, ?, ?)", (doc_id, h, version, json.dumps(ids)))
+    db.commit()
+    return "updated" if row else "created"
+
+def handle_deletions(current_doc_ids, index):
+    for doc_id, chunk_ids in db.execute("SELECT doc_id, chunk_ids FROM docs").fetchall():
+        if doc_id not in current_doc_ids:
+            index.delete(ids=json.loads(chunk_ids))
+            db.execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
+    db.commit()
+```
+
+<Pitfall>
+**Deletions are a compliance issue.** If a document is deleted or its permissions change in the source system, the index must follow quickly — otherwise the assistant keeps answering from content users are no longer allowed to see. Sync **ACL changes**, not just content changes.
+</Pitfall>
+
+### Event-driven ingestion
+
+Instead of polling, react to source events: S3 `ObjectCreated` → SQS → ingestion worker; SharePoint / Microsoft Graph change notifications; database change-data capture (Debezium).
+
+- Workers must be **idempotent**, because the same event may arrive twice. Keying chunk IDs by document ID and version, as above, makes reprocessing safe ([queues and idempotent jobs](/learn/python-backend/production-backend/)).
+- Failed documents go to a **dead-letter queue** with the error, and a dashboard shows per-document status.
+
+### Embedding at scale
+
+- Batch texts (64–256 per call) for GPU or API efficiency, and respect provider rate limits.
+- **Cache embeddings by content hash**, so unchanged chunks are never re-embedded.
+- Record the embedding model name and version in metadata. Changing models means building a new index **side by side**, back-filling it, evaluating it, then switching traffic — **blue–green indexing**.
+
+## Multi-tenancy patterns
+
+<Level l="advanced" />
+
+| Pattern | How | Pros / cons |
+|---|---|---|
+| Shared index + tenant filter | `tenant_id` metadata, filtered in every query | Cheap and simple; a missing filter is a data leak, so enforce it in one data-access layer |
+| Namespace / collection per tenant | A separate logical index | Strong isolation, easy deletion; overhead with thousands of tenants |
+| Database per tenant | Physically separate | Strictest isolation (regulated customers); highest cost |
+
+```python title="tenant_retriever.py"
+class TenantRetriever:
+    """The ONLY way application code can query the index — tenant and ACL filters are not optional."""
+
+    def __init__(self, index):
+        self.index = index
+
+    def search(self, query_vec, user, k=20):
+        flt = {"must": [{"key": "tenant_id", "match": user["tenant"]},
+                        {"key": "acl", "match_any": user["groups"] + ["public"]}]}
+        return self.index.search(query_vec, filter=flt, limit=k)
+```
+
+`user` comes from the verified login token on the server — never from the request body.
+
+## Agentic RAG with LangGraph: corrective retrieval
+
+<Level l="advanced" />
+
+A fixed retrieve-then-generate pipeline answers badly when retrieval fails. **Corrective RAG** adds decision points: grade the retrieved documents, rewrite the query and retry if they're poor, fall back gracefully, and check the answer's grounding before returning it.
+
+```mermaid caption="Corrective RAG as a graph: retrieval is graded, retried with a better query, and the answer is checked for grounding before it's returned."
+flowchart TD
+  S([Start]) --> R[Retrieve]
+  R --> G[Grade passages]
+  G --> D{At least 2<br/>relevant?}
+  D -- yes --> GEN[Generate with citations]
+  D -- no, attempts left --> RW[Rewrite query] --> R
+  D -- no, out of attempts --> FB[Fallback: say so + escalate] --> E([End])
+  GEN --> GR{Grounded?}
+  GR -- yes --> E
+  GR -- no --> RW
+```
+
+```python title="crag.py"
+from typing import Literal, TypedDict
+from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
+
+class RAGState(TypedDict):
+    question: str
+    query: str
+    docs: list[dict]
+    answer: str
+    attempts: int
+
+class Verdict(BaseModel):
+    ok: bool
+    reason: str
+
+def retrieve(s: RAGState):
+    return {"docs": hybrid_search(s["query"], k=8), "attempts": s.get("attempts", 0) + 1}
+
+def grade(s: RAGState):
+    kept = [d for d in s["docs"]
+            if llm_structured(f"Is this passage useful for answering: {s['question']}?\n"
+                              f"<passage>{d['text']}</passage>", Verdict).ok]
+    return {"docs": kept}
+
+def decide(s: RAGState) -> Literal["generate", "rewrite", "fallback"]:
+    if len(s["docs"]) >= 2:
+        return "generate"
+    return "rewrite" if s["attempts"] < 2 else "fallback"
+
+def rewrite(s: RAGState):
+    q = llm_text("Rewrite this question as a better search query for an internal policy knowledge base. "
+                 f"Use specific terms and synonyms.\nQuestion: {s['question']}\nReturn only the query.")
+    return {"query": q}
+
+def fallback(s: RAGState):
+    return {"answer": "I couldn't find this in the knowledge base. I've raised it with the HR team.", "docs": []}
+
+def generate(s: RAGState):
+    ctx = "\n\n".join(f"[{i + 1}] {d['text']}" for i, d in enumerate(s["docs"]))
+    return {"answer": llm_text(f"Answer using only the passages, cite [n].\n{ctx}\n\nQuestion: {s['question']}")}
+
+def grounded(s: RAGState) -> Literal["ok", "retry"]:
+    v = llm_structured(f"Is every claim in the answer supported by the passages?\n"
+                       f"<answer>{s['answer']}</answer>\n<passages>{[d['text'] for d in s['docs']]}</passages>",
+                       Verdict)
+    return "ok" if v.ok or s["attempts"] >= 2 else "retry"
+
+g = StateGraph(RAGState)
+for name, fn in [("retrieve", retrieve), ("grade", grade), ("rewrite", rewrite),
+                 ("fallback", fallback), ("generate", generate)]:
+    g.add_node(name, fn)
+g.add_edge(START, "retrieve")
+g.add_edge("retrieve", "grade")
+g.add_conditional_edges("grade", decide, {"generate": "generate", "rewrite": "rewrite", "fallback": "fallback"})
+g.add_edge("rewrite", "retrieve")
+g.add_conditional_edges("generate", grounded, {"ok": END, "retry": "rewrite"})
+g.add_edge("fallback", END)
+crag = g.compile()
+
+result = crag.invoke({"question": "Can I claim internet bills while working from home?",
+                      "query": "internet bill reimbursement WFH", "attempts": 0})
+```
+
+<Tip>
+**Agentic RAG costs more.** Grading each passage with an LLM multiplies calls. Use a small, fast model or a cross-encoder score threshold for grading, and save LLM grading for borderline cases. Measure whether the extra steps actually improve your golden-set metrics before shipping them ([Evaluation](/learn/evaluation/core/)).
+</Tip>
+
+### Query routing across sources
+
+```python title="router.py"
+from typing import Literal
+from pydantic import BaseModel
+
+class Route(BaseModel):
+    source: Literal["policies", "sql_analytics", "tickets", "general"]
+    reason: str
+
+ROUTER_PROMPT = """Route the question to the best source:
+- policies: HR/travel/IT policy documents
+- sql_analytics: numbers about headcount, attrition, leave usage (structured data)
+- tickets: past support tickets and their resolutions
+- general: greetings or questions not about company data
+Question: {q}"""
+
+def answer(q, user):
+    route = llm_structured(ROUTER_PROMPT.format(q=q), Route).source
+    handlers = {"policies": policy_rag, "sql_analytics": text_to_sql_answer,
+                "tickets": ticket_rag, "general": small_talk}
+    return handlers[route](q, user)
+```
+
+## GraphRAG with Neo4j
+
+<Level l="advanced" />
+
+Neo4j stores entities as nodes and relationships as edges, queried with **Cypher**. It also supports vector indexes, so one database can do graph traversal *and* semantic search together.
+
+### Modelling and loading a graph
+
+```python title="neo4j_load.py"
+# pip install neo4j
+from neo4j import GraphDatabase
+
+driver = GraphDatabase.driver("neo4j://localhost:7687", auth=("neo4j", NEO4J_PASSWORD))
+
+SCHEMA = """
+CREATE CONSTRAINT emp_id IF NOT EXISTS FOR (e:Employee) REQUIRE e.id IS UNIQUE;
+CREATE CONSTRAINT sys_name IF NOT EXISTS FOR (s:System) REQUIRE s.name IS UNIQUE;
+CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE;
+CREATE VECTOR INDEX chunk_embeddings IF NOT EXISTS FOR (c:Chunk) ON (c.embedding)
+OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}};
+"""
+with driver.session() as s:
+    for stmt in filter(str.strip, SCHEMA.split(";")):
+        s.run(stmt)
+
+ALLOWED_LABELS = {"Employee", "System", "Team", "Vendor", "Policy"}
+
+def load_triples(triples, chunk):
+    """triples come from LLM extraction: source, source_type, relation, target, target_type."""
+    with driver.session() as s:
+        s.run("MERGE (c:Chunk {id: $id}) SET c.text = $text, c.embedding = $emb",
+              id=chunk["id"], text=chunk["text"], emb=chunk["embedding"])
+        for t in triples:
+            if t["source_type"] not in ALLOWED_LABELS or t["target_type"] not in ALLOWED_LABELS:
+                continue                                     # labels can't be parameters: allow-list them
+            s.run(f"""MERGE (a:{t['source_type']} {{name: $src}})
+                      MERGE (b:{t['target_type']} {{name: $tgt}})
+                      MERGE (a)-[r:RELATES {{type: $rel}}]->(b)
+                      WITH a, b MATCH (c:Chunk {{id: $cid}})
+                      MERGE (c)-[:MENTIONS]->(a) MERGE (c)-[:MENTIONS]->(b)""",
+                  src=t["source"], tgt=t["target"], rel=t["relation"], cid=chunk["id"])
+```
+
+<Pitfall>
+**Validate labels before formatting Cypher.** Node labels can't be query parameters, so they're formatted into the string. Restrict them to an allow-list (as above) — otherwise text extracted by the LLM could inject Cypher. Everything else goes in as a parameter.
+</Pitfall>
+
+### Hybrid graph + vector retrieval
+
+```python title="graph_vector.py"
+HYBRID = """
+CALL db.index.vector.queryNodes('chunk_embeddings', $k, $qvec) YIELD node AS chunk, score
+OPTIONAL MATCH (chunk)-[:MENTIONS]->(e)-[r:RELATES]-(n)
+RETURN chunk.text AS text, score,
+       collect(DISTINCT e.name + ' -[' + r.type + ']- ' + n.name)[..15] AS facts
+ORDER BY score DESC
+"""
+
+def graph_rag_context(question, k=5):
+    qvec = embedder.encode(question, normalize_embeddings=True).tolist()
+    with driver.session() as s:
+        rows = s.run(HYBRID, k=k, qvec=qvec).data()
+    return "\n\n".join(f"Passage (score {r['score']:.2f}): {r['text']}\nRelated facts: {'; '.join(r['facts'])}"
+                       for r in rows)
+```
+
+### Text-to-Cypher for relational questions
+
+```python title="text_to_cypher.py"
+CYPHER_PROMPT = """Write a read-only Cypher query for the question.
+Graph schema:
+(:Employee {name, id, role})-[:RELATES {type:'MEMBER_OF'}]->(:Team {name})
+(:Team)-[:RELATES {type:'OWNS'}]->(:System {name})
+(:System)-[:RELATES {type:'INTEGRATES_WITH'}]->(:System)
+Rules: MATCH/RETURN only, no CREATE/MERGE/DELETE/SET. LIMIT 50.
+Question: {q}
+Return only the Cypher."""
+
+WRITE_WORDS = ("CREATE", "MERGE", "DELETE", "SET ", "REMOVE", "DROP", "LOAD CSV", "CALL")
+
+def ask_graph(q):
+    cypher = llm_text(CYPHER_PROMPT.replace("{q}", q)).strip().strip("`")
+    if any(w in cypher.upper() for w in WRITE_WORDS):
+        raise ValueError("write or procedure call rejected")
+    with driver.session(default_access_mode="READ") as s:      # read-only session: the real guard
+        return cypher, s.run(cypher, timeout=5).data()
+
+# "Which teams own systems that integrate with UKG?" -> a 2-hop traversal no vector search answers reliably
+```
+
+The keyword check is a first filter; the guarantees come from a **read-only session** and a database user with **read-only permissions**.
+
+| Question type | Best retrieval |
+|---|---|
+| "What does the travel policy say about per diem?" | Vector / hybrid RAG |
+| "Which systems would break if the ATS API changes?" | Graph traversal (multi-hop dependencies) |
+| "Who owns the payroll integration and what are its open incidents?" | Graph + vector (entities + related text) |
+| "How many open incidents per team last month?" | SQL or Cypher aggregation |
+
+## Managed RAG services
+
+<Level l="advanced" />
+
+| Service | What it provides | Consider when |
+|---|---|---|
+| Amazon Bedrock Knowledge Bases | Managed ingestion from S3 and other sources, chunking, embedding, a vector store (OpenSearch Serverless, Aurora pgvector and others), a RetrieveAndGenerate API | You're on AWS and want minimal operations |
+| Amazon OpenSearch | A hybrid search engine (vector + BM25) you configure | You need control or already run OpenSearch |
+| Azure AI Search | Indexers for Blob/SharePoint/SQL, skillsets (OCR, chunking, embedding), hybrid search + semantic ranker, security trimming | Azure / Microsoft 365 environments |
+| Vertex AI Search / RAG Engine | Managed retrieval over Cloud Storage and websites, grounding APIs | GCP environments |
+| Pinecone, Weaviate Cloud, Qdrant Cloud, Zilliz | Managed vector databases | A portable, vendor-neutral vector layer |
+
+```python title="bedrock_kb.py"
+# Amazon Bedrock Knowledge Base: retrieve only (you control generation)
+import boto3
+
+agent_rt = boto3.client("bedrock-agent-runtime", region_name="ap-south-1")
+resp = agent_rt.retrieve(
+    knowledgeBaseId="KB12345",
+    retrievalQuery={"text": "per diem for international travel"},
+    retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 5, "overrideSearchType": "HYBRID"}})
+for r in resp["retrievalResults"]:
+    print(round(r["score"], 3), r["location"], r["content"]["text"][:100])
+```
+
+```python title="azure_ai_search.py"
+# Azure AI Search: hybrid query (keyword + vector) with semantic re-ranking and security trimming
+from azure.identity import DefaultAzureCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.models import VectorizedQuery
+
+sc = SearchClient("https://<service>.search.windows.net", "policies-index", DefaultAzureCredential())
+q = "per diem for international travel"
+results = sc.search(
+    search_text=q,
+    vector_queries=[VectorizedQuery(vector=embed(q), k_nearest_neighbors=20, fields="content_vector")],
+    query_type="semantic", semantic_configuration_name="default",
+    filter="group_ids/any(g: search.in(g, 'all,finance'))", top=5)   # build from the user's groups
+for r in results:
+    print(r["@search.reranker_score"], r["title"])
+```
+
+<Tip>
+**Managed vs self-built.** Managed services get you to a working pipeline quickly, with built-in connectors and security integration. Self-built pipelines give full control over parsing, chunking, re-ranking and evaluation. Many teams start managed and replace the components that limit quality. Either way, the [evaluation](/learn/evaluation/core/) discipline is the same.
+</Tip>
+
+## RAG performance engineering
+
+<Level l="advanced" />
+
+| Stage | Typical latency | Optimisations |
+|---|---|---|
+| Query rewrite (LLM) | 300–800 ms | Small model; skip when there's no history |
+| Query embedding | 10–50 ms | Local model, batching, caching |
+| Vector + BM25 search | 10–100 ms | HNSW tuning, filters inside the index, parallel retrievers |
+| Re-ranking (cross-encoder) | 50–400 ms | GPU, fewer candidates (20–30), a small re-ranker |
+| LLM generation | 1–5 s | Streaming, prompt caching, concise answers, a faster model |
+
+Run retrievers concurrently, and stream the answer while **sending sources first** ([deep dive](/learn/rag-orchestration/deep-dive/)). For high-traffic FAQs, a [semantic cache](/learn/advanced-rag/deep-dive/) scoped by permission set removes the LLM call entirely.
+
+<Interview>
+<QA q="How do you keep a RAG index in sync with SharePoint?">
+Event-driven ingestion from change notifications into a queue; idempotent workers that hash content and ACLs, re-chunk and re-embed only changed documents, delete stale chunk IDs, and send failures to a dead-letter queue. Run periodic full reconciliation to catch missed events and deletions.
+</QA>
+<QA q="How do you change embedding models without downtime?">
+Blue–green indexing: build a new index with the new model alongside the old one, back-fill it, run the golden-set evaluation on both, then switch traffic and keep the old index for rollback.
+</QA>
+<QA q="When would you add a graph database to a RAG system?">
+When important questions are about relationships across entities — dependencies, ownership, multi-hop chains — that vector search can't answer reliably. Combine graph traversal with vector search over the linked text chunks.
+</QA>
+</Interview>
+
+<Takeaways>
+- Production ingestion is incremental, event-driven, idempotent, ACL-aware and observable.
+- Agentic RAG (grade → rewrite → retry → fallback → grounding check) improves robustness at extra cost — measure it.
+- Neo4j combines graph traversal, text-to-Cypher and vector search for relational, multi-hop questions; managed services (Bedrock Knowledge Bases, Azure AI Search) trade control for speed.
+</Takeaways>

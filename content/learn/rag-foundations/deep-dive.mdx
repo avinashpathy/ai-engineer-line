@@ -1,0 +1,274 @@
+---
+summary: "How IVF, product quantisation and HNSW really work (with cost and compression maths), binary and scalar quantisation, Matryoshka embeddings, measuring index recall, choosing and benchmarking embedding models, pgvector with hybrid search in one SQL query, Qdrant with filters and quantisation, filtered-search pitfalls and multi-tenancy, and chunking strategies compared in code."
+---
+
+## How ANN indexes work
+
+<Level l="advanced" />
+
+### IVF (inverted file index)
+
+1. **Train:** run k-means on a sample of the vectors to get `nlist` centroids (typically √N to 4√N).
+2. **Index:** put each vector in the list of its nearest centroid.
+3. **Search:** find the `nprobe` centroids closest to the query and scan only their lists.
+
+<Example title="Worked example: what IVF saves">
+10 million vectors with nlist = 4,096 gives about 2,440 vectors per list.
+
+With nprobe = 16, a query compares against 4,096 centroids + 16 × 2,440 ≈ **43,000 vectors** instead of 10,000,000 — about **230× less work**. Raising nprobe improves recall at the cost of speed.
+</Example>
+
+### Product quantisation (PQ)
+
+Split each d-dimensional vector into m sub-vectors. Run k-means (usually 256 centroids) separately in each sub-space, and store each sub-vector as the 1-byte ID of its nearest centroid. Distances are then computed with small lookup tables.
+
+<Example title="Worked example: PQ compression">
+A 768-dimension float32 vector is 768 × 4 = **3,072 bytes**. PQ with m = 96 sub-vectors × 1 byte = **96 bytes** — a 32× reduction.
+
+100 million vectors drop from about **307 GB to 9.6 GB**. IVF-PQ (IVF lists holding PQ codes) is the classic billion-scale recipe; re-rank the top candidates with full vectors to recover accuracy.
+</Example>
+
+### HNSW (hierarchical navigable small world)
+
+A multi-layer proximity graph. Upper layers are sparse "highways"; the bottom layer contains every point. Search starts at the top, greedily moves to the neighbour closest to the query, drops a layer and repeats.
+
+```mermaid caption="HNSW search enters at the sparse top layer and descends, getting closer to the query at each layer."
+flowchart TD
+  subgraph L2[Layer 2 · highways]
+    A2((entry)) --> B2((·))
+  end
+  subgraph L1[Layer 1 · main roads]
+    B1((·)) --> C1((·)) --> D1((·))
+  end
+  subgraph L0[Layer 0 · every point]
+    D0((·)) --> E0((·)) --> F0((nearest))
+  end
+  B2 -. drop a layer .-> B1
+  D1 -. drop a layer .-> D0
+```
+
+| Parameter | Effect |
+|---|---|
+| `M` (links per node) | Higher = better recall, more memory (typically 16–64) |
+| `ef_construction` | Build-time candidate list; higher = better graph, slower build (100–400) |
+| `ef_search` | Query-time candidate list; **the main recall/latency knob** (50–500) |
+
+HNSW gives excellent recall at low latency but keeps full vectors and graph links in RAM; deletes and updates are handled lazily. DiskANN-style indexes keep most of the data on SSD for very large collections.
+
+### Binary and scalar quantisation
+
+- **Scalar (int8):** 4× smaller, tiny recall loss.
+- **Binary:** 1 bit per dimension (its sign) → 32× smaller. Hamming distance is extremely fast. Use it as a first stage, then re-score the candidates with full-precision vectors.
+- **Matryoshka embeddings:** models trained so the first 256 (or 128) dimensions already form a good embedding. Truncate to trade accuracy for size.
+
+## Measuring vector search quality
+
+<Level l="advanced" />
+
+**Index recall@k** is the overlap between the ANN top-k and the exact (brute-force) top-k. Tune index parameters to hit, say, 95–99% recall within your latency budget.
+
+This is different from **retrieval quality** — whether the results are actually *relevant* — which depends on the embedding model and chunking ([Evaluation](/learn/evaluation/)).
+
+```python title="hnsw_recall.py"
+import time
+import faiss, numpy as np
+
+d, N = 384, 200_000
+xb = np.random.rand(N, d).astype("float32"); faiss.normalize_L2(xb)
+xq = xb[:1000] + 0.01 * np.random.rand(1000, d).astype("float32"); faiss.normalize_L2(xq)
+
+flat = faiss.IndexFlatIP(d); flat.add(xb)
+_, gt = flat.search(xq, 10)                                  # exact ground truth
+
+h = faiss.IndexHNSWFlat(d, 32, faiss.METRIC_INNER_PRODUCT)
+h.hnsw.efConstruction = 200
+h.add(xb)
+for ef in (16, 64, 256):
+    h.hnsw.efSearch = ef
+    t0 = time.time(); _, I = h.search(xq, 10)
+    recall = np.mean([len(set(I[i]) & set(gt[i])) / 10 for i in range(len(xq))])
+    print(f"efSearch={ef:3d}  recall@10={recall:.3f}  {1000 * (time.time() - t0) / len(xq):.2f} ms/query")
+```
+
+## Choosing an embedding model
+
+<Level l="advanced" />
+
+| Consideration | Guidance |
+|---|---|
+| Language | A multilingual model (bge-m3, multilingual-e5) for Indian or mixed languages |
+| Domain | Test on your data; legal, medical and code have specialised models |
+| Dimensions | 384–1024 is typical; more dimensions cost more storage and compute |
+| Max input length | 512 tokens is common; long-context embedders take 8k |
+| Query/passage prefixes | e5 needs "query: " / "passage: "; bge recommends an instruction for queries |
+| Licence and hosting | Open weights (self-host, data stays in) vs an API |
+| Asymmetric search | Short queries vs long passages — use models trained for retrieval, not just similarity |
+
+### Benchmark on your own data
+
+```python title="embedding_benchmark.py"
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+def hit_rate(model_name, queries, passages, gold, k=5, q_prefix="", p_prefix=""):
+    m = SentenceTransformer(model_name)
+    P = m.encode([p_prefix + p for p in passages], normalize_embeddings=True, batch_size=64)
+    Q = m.encode([q_prefix + q for q in queries], normalize_embeddings=True)
+    top = np.argsort(-(Q @ P.T), axis=1)[:, :k]
+    return np.mean([gold[i] in top[i] for i in range(len(queries))])
+
+for name, qp, pp in [
+    ("all-MiniLM-L6-v2", "", ""),
+    ("BAAI/bge-base-en-v1.5", "Represent this sentence for searching relevant passages: ", ""),
+    ("intfloat/e5-base-v2", "query: ", "passage: "),
+]:
+    print(name, hit_rate(name, queries, passages, gold, q_prefix=qp, p_prefix=pp))
+```
+
+## pgvector in practice
+
+<Level l="advanced" />
+
+One table holds the text, metadata, the vector and a full-text index, so semantic and keyword search live together:
+
+```sql title="schema.sql"
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE doc_chunks (
+  id          BIGSERIAL PRIMARY KEY,
+  doc_id      TEXT NOT NULL,
+  tenant_id   TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  metadata    JSONB DEFAULT '{}',
+  embedding   vector(768),
+  content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+);
+
+CREATE INDEX ON doc_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);
+CREATE INDEX ON doc_chunks USING gin (content_tsv);       -- full-text (keyword) search
+CREATE INDEX ON doc_chunks (tenant_id);
+```
+
+**Hybrid search with reciprocal rank fusion (RRF), in one statement.** Each list contributes 1 / (60 + rank) for every result it returns; results found by both lists rise to the top.
+
+```sql title="hybrid_search.sql"
+WITH semantic AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS r
+  FROM doc_chunks WHERE tenant_id = $2
+  ORDER BY embedding <=> $1 LIMIT 20),
+keyword AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(content_tsv, q) DESC) AS r
+  FROM doc_chunks, plainto_tsquery('english', $3) q
+  WHERE tenant_id = $2 AND content_tsv @@ q LIMIT 20)
+SELECT c.id, c.content,
+       COALESCE(1.0 / (60 + s.r), 0) + COALESCE(1.0 / (60 + k.r), 0) AS rrf
+FROM doc_chunks c
+LEFT JOIN semantic s ON s.id = c.id
+LEFT JOIN keyword  k ON k.id = c.id
+WHERE s.id IS NOT NULL OR k.id IS NOT NULL
+ORDER BY rrf DESC LIMIT 5;
+```
+
+```python title="pgvector_insert.py"
+import psycopg
+from pgvector.psycopg import register_vector
+
+conn = psycopg.connect("postgresql://app@localhost/rag")
+register_vector(conn)
+emb = model.encode(chunks, normalize_embeddings=True)
+with conn.cursor() as cur:
+    cur.executemany(
+        "INSERT INTO doc_chunks (doc_id, tenant_id, content, embedding) VALUES (%s, %s, %s, %s)",
+        [(d, "acme", c, e) for d, c, e in zip(doc_ids, chunks, emb)])
+    cur.execute("SET hnsw.ef_search = 100")
+conn.commit()
+```
+
+## Qdrant in practice
+
+<Level l="advanced" />
+
+```python title="qdrant_demo.py"
+from qdrant_client import QdrantClient, models
+
+client = QdrantClient(url="http://localhost:6333")
+client.create_collection(
+    "policies",
+    vectors_config=models.VectorParams(size=768, distance=models.Distance.COSINE),
+    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=200),
+    quantization_config=models.ScalarQuantization(
+        scalar=models.ScalarQuantizationConfig(type=models.ScalarType.INT8, always_ram=True)))
+client.create_payload_index("policies", field_name="dept", field_schema="keyword")
+
+client.upsert("policies", points=[
+    models.PointStruct(id=i, vector=v.tolist(), payload={"text": t, "dept": d})
+    for i, (v, t, d) in enumerate(zip(emb, chunks, depts))])
+
+hits = client.query_points(
+    "policies", query=q_vec.tolist(), limit=5,
+    query_filter=models.Filter(must=[models.FieldCondition(key="dept", match=models.MatchValue(value="HR"))]),
+    search_params=models.SearchParams(hnsw_ef=128)).points
+for h in hits:
+    print(round(h.score, 3), h.payload["text"][:80])
+```
+
+## Filtered search pitfalls
+
+<Level l="advanced" />
+
+**Filtering after the ANN search can return too few results** — the top 20 neighbours may all belong to other tenants, leaving nothing after the filter. Good vector databases apply filters *during* graph traversal or use per-filter partitions.
+
+For strict multi-tenancy with many tenants, consider a collection or namespace per tenant, or a tenant-partitioned index. Either way, the tenant filter must be applied **inside** the search, never trusted to the prompt.
+
+## Chunking strategies compared in code
+
+<Level l="advanced" />
+
+```python title="chunking.py"
+import re
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+
+md = open("handbook.md").read()
+
+# 1. Structure-aware: split by headings and keep the heading path as metadata
+header_splitter = MarkdownHeaderTextSplitter([("#", "h1"), ("##", "h2"), ("###", "h3")])
+sections = header_splitter.split_text(md)
+
+# 2. Then size-limit long sections
+sizer = RecursiveCharacterTextSplitter.from_tiktoken_encoder(chunk_size=500, chunk_overlap=60)
+chunks = sizer.split_documents(sections)
+for c in chunks:
+    path = " > ".join(v for k, v in c.metadata.items() if k.startswith("h"))
+    c.page_content = f"[{path}]\n{c.page_content}"           # contextual header in every chunk
+
+# 3. Semantic chunking: break where neighbouring-sentence similarity drops
+def semantic_chunks(text, model, threshold=0.55, max_sents=12):
+    sents = re.split(r"(?<=[.!?])\s+", text)
+    E = model.encode(sents, normalize_embeddings=True)
+    out, cur = [], [sents[0]]
+    for i in range(1, len(sents)):
+        if float(E[i] @ E[i - 1]) < threshold or len(cur) >= max_sents:
+            out.append(" ".join(cur)); cur = []
+        cur.append(sents[i])
+    return out + [" ".join(cur)]
+```
+
+Run your golden-set evaluation for each strategy. Results differ by corpus — there is no universally best chunker.
+
+<Interview>
+<QA q="How would you store 100 million 768-dimension embeddings affordably?">
+Full float32 vectors are about 307 GB. Use IVF-PQ (around 96 bytes per vector, about 10 GB) or int8/binary quantisation for a first-stage search, then re-score the top candidates with full-precision vectors stored on disk.
+</QA>
+<QA q="What does ef_search do in HNSW?">
+It sets the size of the candidate list kept during the query. Larger values explore more of the graph — higher recall, higher latency. It's the main knob you tune against an exact-search ground truth.
+</QA>
+<QA q="Why can metadata filtering hurt recall?">
+If the filter is applied after the ANN search, most of the top-k may be filtered out. Use a database that filters during traversal, or partition the index by the filter key (for example, per tenant).
+</QA>
+</Interview>
+
+<Takeaways>
+- IVF partitions, PQ compresses, HNSW navigates a graph; tune their parameters for recall against latency.
+- Benchmark embedding models on your own queries; mind prefixes, languages and dimensions.
+- pgvector and Qdrant both support filtered, hybrid search — apply tenant filters inside the search.
+</Takeaways>

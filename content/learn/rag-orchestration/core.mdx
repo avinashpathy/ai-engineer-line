@@ -1,0 +1,176 @@
+---
+summary: "Why orchestration frameworks exist, LangChain's building blocks, a RAG chain built step by step with LCEL, streaming, returning sources with the answer, conversational RAG with query rewriting, metadata filtering for relevance and security, and tracing — plus when to skip the framework."
+---
+
+## Why an orchestration framework?
+
+<Level l="intermediate" />
+
+A real RAG app needs document loaders for dozens of formats, splitters, embedding models, vector stores, retrievers, prompt templates, LLM clients, output parsers, memory, streaming and tracing. **LangChain** gives each of these a standard interface, so components are swappable — change Chroma to pgvector, or one LLM to another, with one line.
+
+Alternatives: **LlamaIndex** (data- and indexing-centric), Haystack, DSPy, or plain Python for simple pipelines (see the [deep dive](/learn/rag-orchestration/deep-dive/)).
+
+## LangChain's building blocks
+
+<Level l="intermediate" />
+
+| Component | Role | Examples |
+|---|---|---|
+| Document loaders | Read sources into `Document(page_content, metadata)` | PyPDFLoader, WebBaseLoader, CSVLoader, Confluence, SharePoint |
+| Text splitters | Chunk documents | RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter |
+| Embeddings | Text → vectors | HuggingFaceEmbeddings, OpenAIEmbeddings |
+| Vector stores | Store and search | Chroma, FAISS, PGVector, Qdrant |
+| Retrievers | Given a query, return documents | `vectorstore.as_retriever()`, BM25, ensemble, multi-query |
+| Prompt templates | Parameterised prompts | ChatPromptTemplate |
+| Chat models | LLM interface | ChatAnthropic, ChatOpenAI, ChatOllama |
+| Output parsers | Structure outputs | StrOutputParser, PydanticOutputParser |
+| LCEL | Compose steps with the pipe operator | `prompt | llm | parser` |
+
+```mermaid caption="A LangChain RAG chain: the retriever and the raw question run in parallel, then flow through the prompt, model and parser."
+flowchart LR
+  Q[Question] --> R[Retriever] --> F[format_docs]
+  Q --> PT[Passthrough]
+  F --> P[Prompt template]
+  PT --> P
+  P --> M[Chat model] --> O[Output parser] --> A[Answer]
+```
+
+## Building a RAG chain step by step
+
+<Level l="intermediate" />
+
+```python title="index_policies.py"
+# pip install langchain langchain-community langchain-chroma langchain-huggingface pypdf
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# 1. Load — one Document per page, with metadata
+docs = PyPDFDirectoryLoader("policies/").load()
+print(len(docs), docs[0].metadata)            # {'source': 'policies/leave.pdf', 'page': 0}
+
+# 2. Split
+splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120,
+                                          separators=["\n\n", "\n", ". ", " "])
+chunks = splitter.split_documents(docs)
+
+# 3. Embed + 4. Store
+emb = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5",
+                            encode_kwargs={"normalize_embeddings": True})
+db = Chroma.from_documents(chunks, emb, persist_directory="chroma_db", collection_name="policies")
+
+# 5. Retriever
+retriever = db.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+for d in retriever.invoke("carry forward casual leave"):
+    print(d.metadata["source"], d.metadata["page"], d.page_content[:80])
+```
+
+### Composing the chain with LCEL
+
+```python title="rag_chain.py"
+from langchain_anthropic import ChatAnthropic          # or ChatOpenAI / ChatOllama
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+
+llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)   # use a current model name
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "Answer ONLY from the context. If it isn't there, say you couldn't find it. "
+               "Cite as [source, page]."),
+    ("human", "Context:\n{context}\n\nQuestion: {question}")])
+
+def format_docs(docs):
+    return "\n\n".join(f"[{d.metadata['source'].split('/')[-1]}, p.{d.metadata['page'] + 1}] "
+                       f"{d.page_content}" for d in docs)
+
+rag_chain = ({"context": retriever | format_docs, "question": RunnablePassthrough()}
+             | prompt | llm | StrOutputParser())
+
+print(rag_chain.invoke("Can I carry forward my casual leave?"))
+
+for token in rag_chain.stream("How many WFH days are allowed?"):   # streaming
+    print(token, end="", flush=True)
+```
+
+### Returning sources alongside the answer
+
+A UI needs the sources as data, not just as text inside the answer:
+
+```python title="chain_with_sources.py"
+from langchain_core.runnables import RunnableParallel
+
+chain_with_sources = RunnableParallel(
+    {"docs": retriever, "question": RunnablePassthrough()}
+).assign(answer=lambda x: (prompt | llm | StrOutputParser()).invoke(
+    {"context": format_docs(x["docs"]), "question": x["question"]}))
+
+out = chain_with_sources.invoke("What is the notice period?")
+print(out["answer"])
+print([d.metadata for d in out["docs"]])
+```
+
+## Conversational RAG
+
+<Level l="intermediate" />
+
+Follow-up questions like "and for sick leave?" mean nothing on their own — retrieving with them finds junk. The fix is **query rewriting**: use the LLM to turn the history plus the follow-up into a standalone question *before* retrieval.
+
+```python title="conversational_rag.py"
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import MessagesPlaceholder
+
+rewrite_prompt = ChatPromptTemplate.from_messages([
+    ("system", "Rewrite the user's latest question as a standalone search query using the chat history. "
+               "Return only the query."),
+    MessagesPlaceholder("history"),
+    ("human", "{question}")])
+rewriter = rewrite_prompt | llm | StrOutputParser()
+
+def conversational_rag(question, history):
+    standalone = rewriter.invoke({"question": question, "history": history}) if history else question
+    return rag_chain.invoke(standalone)
+
+history = [HumanMessage("How many casual leaves do I get?"), AIMessage("12 per year [leave.pdf, p.3]")]
+conversational_rag("and sick leave?", history)   # retrieves with "How many sick leaves do employees get?"
+```
+
+## Metadata filtering
+
+<Level l="intermediate" />
+
+Store metadata with each chunk — department, document type, date, access level, language — and filter at query time. This matters for **relevance** (only current HR policies) and for **security**: users must only retrieve documents they're allowed to see.
+
+```python
+retriever = db.as_retriever(search_kwargs={"k": 4, "filter": {"department": "HR"}})
+```
+
+<Pitfall>
+Build security filters from the **authenticated user's** permissions on the server — never from anything the user or the model can type. A filter the model chooses is a suggestion; a filter your code applies is a control.
+</Pitfall>
+
+## Tracing and observability
+
+<Level l="intermediate" />
+
+Use LangSmith, Langfuse, Arize Phoenix or OpenTelemetry to trace every step: the rewritten query, retrieved chunks with scores, the final prompt, tokens, latency and cost. **Debugging RAG without traces is guesswork** — when an answer is wrong, the trace tells you whether retrieval missed or the model ignored good context.
+
+<Tip>
+**Keep it simple.** LCEL chains are great for linear pipelines. For branching, loops, retries and multi-agent flows, use [LangGraph](/learn/langgraph/). For a simple RAG endpoint, 60 lines of plain Python with a vector database client is perfectly professional.
+</Tip>
+
+<Interview>
+<QA q="How do you handle follow-up questions in a RAG chatbot?">
+Rewrite the latest message plus recent history into a standalone query and retrieve with that; pass the recent turns to the generation step so the answer stays conversational.
+</QA>
+<QA q="How do you stop users retrieving documents they shouldn't see?">
+Attach access metadata (tenant, groups, classification) to every chunk at ingestion, and apply a filter built from the authenticated user's permissions inside the vector search — never after generation and never chosen by the model.
+</QA>
+</Interview>
+
+<Takeaways>
+- LangChain gives every RAG component a standard, swappable interface; LCEL composes them.
+- Return sources as data, stream tokens, and rewrite follow-ups into standalone queries.
+- Metadata filters serve relevance and security; trace every step.
+</Takeaways>

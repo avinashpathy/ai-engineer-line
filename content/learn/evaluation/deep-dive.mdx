@@ -1,0 +1,272 @@
+---
+summary: "Evaluation-driven development, generating and reviewing a synthetic test set, writing and validating LLM-as-judge prompts (agreement, position, verbosity and self-preference bias), pairwise A/B evaluation, DeepEval in CI, cheap deterministic checks, a complete evaluation harness, evaluating agents (tool-call accuracy and trajectories), online evaluation with a significance test, and cost and latency profiling."
+---
+
+## Evaluation-driven development
+
+<Level l="advanced" />
+
+Treat evaluation like unit tests for AI systems:
+
+1. Write the evaluation set **before** optimising.
+2. Every change — prompt, chunking, model, retriever — runs the suite.
+3. Accept a change only if metrics improve (or hold) on the suite **and** on guardrail sets.
+4. Grow the suite from production failures.
+
+## Generating a synthetic test set
+
+<Level l="advanced" />
+
+```python title="make_testset.py"
+import json
+import random
+
+GEN = """You are creating test questions for a policy assistant.
+From the passage below, write {n} diverse questions a real employee might ask that the passage answers,
+plus the exact answer. Vary difficulty and phrasing (formal, casual, with typos).
+Return a JSON list: [{{"question": ..., "answer": ..., "difficulty": "easy|medium|hard"}}]
+Passage: <<<{passage}>>>"""
+
+testset = []
+for ch in random.sample(chunks, 60):
+    for item in json.loads(llm(GEN.format(n=2, passage=ch["text"]))):
+        item.update({"source_chunk": ch["id"], "source": ch["source"]})
+        testset.append(item)
+
+# Then add: multi-hop questions combining two chunks, unanswerable questions, adversarial phrasings.
+# HUMAN REVIEW: delete ambiguous or wrong items, fix answers. Freeze as golden_v1.jsonl.
+```
+
+<Pitfall>
+**Synthetic questions are too easy.** LLM-generated questions tend to reuse the passage's wording, which inflates retrieval scores. Paraphrase them, add real user queries as soon as you have them, and weight real queries higher in reporting.
+</Pitfall>
+
+## Designing LLM-as-judge prompts
+
+<Level l="advanced" />
+
+Good judge prompts are specific, use a rubric, ask for reasoning first and output structured scores.
+
+```text title="judge_prompt.txt"
+You are evaluating an answer from a company policy assistant.
+<question>{question}</question>
+<reference_answer>{reference}</reference_answer>
+<retrieved_context>{context}</retrieved_context>
+<assistant_answer>{answer}</assistant_answer>
+
+Evaluate on:
+1. correctness (1-5): does the answer agree with the reference? Missing key facts lowers the score.
+2. faithfulness (1-5): is every claim supported by the retrieved context? Any unsupported claim => max 2.
+3. citation_quality (1-5): do citations point to passages that support the claims?
+4. refusal_appropriate (true/false/na): if the reference says the answer is not available, did the assistant decline?
+
+First write brief reasoning for each criterion, then output JSON:
+{"reasoning": "...", "correctness": n, "faithfulness": n, "citation_quality": n, "refusal_appropriate": ...}
+```
+
+### Validating the judge
+
+- **Label 50–100 answers yourself** and compute the judge's agreement with you (accuracy, Cohen's κ, or correlation). Don't trust a judge you haven't validated.
+- **Check for biases:**
+  - *Position bias* — in pairwise comparisons, swap the order and average.
+  - *Verbosity bias* — longer is not better.
+  - *Self-preference* — judges favour their own model family; use a different family as the judge where possible.
+- **Prefer binary or narrow scales** (pass/fail, 1–3) for consistency, and anchor each score with a description.
+
+## Pairwise evaluation for A/B decisions
+
+<Level l="advanced" />
+
+```python title="pairwise.py"
+import json
+
+PAIR = """Which answer better addresses the question using the context?
+Consider correctness, faithfulness and clarity.
+Question: {q}
+Answer A: {a}
+Answer B: {b}
+Reply with JSON {{"winner": "A" | "B" | "tie", "reason": "..."}}"""
+
+def pairwise(q, ans_old, ans_new):
+    r1 = json.loads(judge(PAIR.format(q=q, a=ans_old, b=ans_new)))["winner"]
+    r2 = json.loads(judge(PAIR.format(q=q, a=ans_new, b=ans_old)))["winner"]   # swapped order
+    flip = {"A": "B", "B": "A", "tie": "tie"}
+    votes = [r1, flip[r2]]                         # both now mean: "A" = old, "B" = new
+    if votes.count("B") == 2:
+        return "new"
+    if votes.count("A") == 2:
+        return "old"
+    return "tie"                                   # the judge changed its mind when the order swapped
+```
+
+Report win/tie/loss rates with a bootstrap confidence interval, and ship the new version only if it wins significantly more often than it loses.
+
+## DeepEval: evaluation as tests
+
+<Level l="advanced" />
+
+```python title="test_rag.py"
+# pip install deepeval
+from deepeval import evaluate
+from deepeval.metrics import AnswerRelevancyMetric, ContextualRecallMetric, FaithfulnessMetric
+from deepeval.test_case import LLMTestCase
+
+cases = []
+for item in golden:
+    out, docs = answer(item["question"])
+    cases.append(LLMTestCase(input=item["question"], actual_output=out,
+                             expected_output=item["answer"],
+                             retrieval_context=[d["text"] for d in docs]))
+
+evaluate(cases, [FaithfulnessMetric(threshold=0.8), AnswerRelevancyMetric(threshold=0.7),
+                 ContextualRecallMetric(threshold=0.7)])
+# Also runnable as pytest tests in CI: deepeval test run test_rag.py
+```
+
+## Deterministic checks: cheap and reliable
+
+<Level l="advanced" />
+
+Not everything needs an LLM judge:
+
+| Check | Implementation |
+|---|---|
+| Valid JSON / schema | Pydantic validation |
+| Contains a required fact | Regex, keyword or number match against the reference |
+| Citation format and validity | A regex for `[n]`; cited IDs exist in the retrieved set |
+| Refusal on unanswerable questions | Exact string match |
+| Length limits | Token count |
+| No personal data in output | Presidio or regex |
+| Latency, tokens, cost | Logged metrics |
+| Retrieval hit@k, MRR | Chunk-ID matching |
+
+Run deterministic checks first (fast, free) and LLM judges for nuanced qualities.
+
+## An evaluation harness
+
+<Level l="advanced" />
+
+```python title="harness.py"
+import json, pathlib, statistics, time
+
+def run_eval(system_fn, golden_path, run_name):
+    golden = [json.loads(line) for line in open(golden_path)]
+    rows = []
+    for g in golden:
+        t0 = time.time()
+        out, docs = system_fn(g["question"])
+        latency = time.time() - t0
+        got_ids = [d["id"] for d in docs]
+        row = {"id": g["id"], "latency_s": latency,
+               "hit@5": g["source_chunk"] in got_ids[:5] if g.get("source_chunk") else None,
+               "refused": "couldn't find" in out.lower(),
+               "should_refuse": g.get("unanswerable", False)}
+        row.update(judge_scores(g, out, docs))            # dict from the LLM judge
+        rows.append(row)
+
+    def mean(k):
+        vals = [r[k] for r in rows if r.get(k) is not None]
+        return round(statistics.mean(vals), 3) if vals else None
+
+    lat = sorted(r["latency_s"] for r in rows)
+    summary = {"run": run_name, "n": len(rows),
+               "hit@5": mean("hit@5"), "correctness": mean("correctness"),
+               "faithfulness": mean("faithfulness"),
+               "refusal_acc": round(statistics.mean(r["refused"] == r["should_refuse"] for r in rows), 3),
+               "p95_latency_s": round(lat[int(0.95 * (len(lat) - 1))], 2)}
+    pathlib.Path("eval_runs").mkdir(exist_ok=True)
+    json.dump({"summary": summary, "rows": rows}, open(f"eval_runs/{run_name}.json", "w"), indent=1)
+    return summary
+```
+
+Keep every run's JSON, compare runs in a table or dashboard, and **look at per-row diffs** — which questions got better or worse. Averages hide regressions.
+
+## Evaluating agents: tool calls and trajectories
+
+<Level l="advanced" />
+
+For an agent, the final answer isn't enough — you also need to know whether it took a sensible **path** to get there. Record every step (thought, tool, arguments, result) for each test case, then score two things.
+
+**Tool-call accuracy** — did it call the right tools with the right arguments?
+
+- *Tool selection:* the expected tool was called (and no forbidden one).
+- *Argument correctness:* the arguments match the expected values, or pass a validator (a valid date range, the right employee ID).
+- *Error rate:* calls that failed schema validation or raised errors.
+
+**Trajectory evaluation** — was the sequence of steps good?
+
+- *Exact or in-order match* against a reference trajectory, for tightly defined workflows.
+- *Required-steps match:* certain steps must appear (for example, "check permissions" before "send email"), in any order.
+- *Efficiency:* number of steps and tokens compared with the reference — loops and redundant calls cost money.
+- *LLM-judged trajectory quality* for open-ended tasks, with a rubric (was each step justified by what came before?).
+
+```python title="agent_eval.py"
+def tool_call_accuracy(trace: list[dict], case: dict) -> dict:
+    calls = [s for s in trace if s["type"] == "tool_call"]
+    names = [c["name"] for c in calls]
+    expected = case["expected_calls"]                    # [{"name": "...", "args": {...}}, ...]
+    right_tool = all(e["name"] in names for e in expected)
+    forbidden = any(n in case.get("forbidden_tools", []) for n in names)
+    args_ok = all(any(c["name"] == e["name"] and all(c["args"].get(k) == v for k, v in e["args"].items())
+                      for c in calls) for e in expected)
+    return {"right_tool": right_tool, "args_ok": args_ok, "forbidden_used": forbidden,
+            "errors": sum(1 for c in calls if c.get("error"))}
+
+def trajectory_score(trace: list[dict], case: dict) -> dict:
+    names = [s["name"] for s in trace if s["type"] == "tool_call"]
+    req = case["required_order"]                         # e.g. ["get_employee", "check_policy", "draft_reply"]
+    it = iter(names)
+    in_order = all(step in it for step in req)           # required steps appear in this order
+    return {"in_order": in_order, "steps": len(names),
+            "over_budget": len(names) > case.get("max_steps", 10)}
+```
+
+Also test **safety behaviours** on the trajectory: did it ask for approval before a side-effecting action, and did it stop when a tool returned an injected instruction? Agent frameworks and tracing tools (LangSmith, Langfuse, Phoenix, DeepEval) record trajectories for you; agent design is covered in the [Agents line](/learn/agent-foundations/).
+
+## Online evaluation in production
+
+<Level l="advanced" />
+
+| Signal | How |
+|---|---|
+| Explicit feedback | Thumbs up/down, "was this helpful?", reason codes |
+| Implicit feedback | Copying or clicking citations; rephrasing the question (a bad sign); escalation to a human; abandoning the session |
+| Sampled LLM-judge scoring | Score 1–5% of traffic for faithfulness and relevance, asynchronously |
+| Human review queues | Weekly review of low-scored and random samples |
+| A/B tests | Split traffic between versions; compare resolution rate, satisfaction and cost |
+
+<Example title="Worked example: reading feedback rates">
+Version A: 1,800 thumbs-up out of 2,400 rated answers (**75.0%**). Version B: 1,900 of 2,350 (**80.9%**).
+
+Two-proportion z-test: pooled p = 3,700 / 4,750 = 0.779. SE = √(0.779 × 0.221 × (1/2,400 + 1/2,350)) = 0.0120. z = 0.059 / 0.0120 ≈ **4.9** → significant.
+
+But check *who* rates: if B's interface made rating easier for happy users, the comparison is biased. Prefer randomised assignment, and look at implicit signals too.
+</Example>
+
+## Cost and latency profiling
+
+<Level l="advanced" />
+
+Break each request into stages and log their timings: query rewrite, embedding, retrieval, re-ranking, LLM time to first token, LLM total, post-processing. Typical findings:
+
+- Re-ranking 50 candidates on CPU takes 300 ms → move it to a GPU or re-rank fewer candidates.
+- The system prompt is 2,000 tokens → trim it or cache it.
+- A slow model rewrites queries → switch to a small one.
+
+<Interview>
+<QA q="How do you know your LLM judge is trustworthy?">
+Label a sample yourself and measure agreement (accuracy or Cohen's κ). Test for position bias by swapping pairwise order, for verbosity bias, and for self-preference; use narrow, anchored scales and a different model family where possible.
+</QA>
+<QA q="How would you evaluate an agent, not just its answers?">
+Record its trajectory. Score tool-call accuracy (right tool, right arguments, no forbidden tools, error rate) and the trajectory itself (required steps in order, step and token efficiency, LLM-judged quality), plus safety behaviours like asking for approval.
+</QA>
+<QA q="Version B has a higher thumbs-up rate. Do you ship it?">
+Only if the difference is statistically significant and the comparison is fair — randomised assignment, the same rating UI, and consistent implicit signals such as fewer rephrasings and escalations.
+</QA>
+</Interview>
+
+<Takeaways>
+- Evaluation-driven development: golden set first, run on every change, grow it from production failures.
+- Validate LLM judges against human labels and control their biases; combine them with deterministic checks.
+- For agents, score tool calls and trajectories as well as answers. Track per-question diffs, online feedback and stage-level latency and cost.
+</Takeaways>

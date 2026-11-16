@@ -1,0 +1,233 @@
+---
+summary: "Why you must measure retrieval and generation separately, building a golden set (including unanswerable questions), retrieval metrics (hit rate, recall@k, precision@k, MRR, nDCG, context recall and precision) with worked examples, generation metrics (faithfulness, answer relevance, correctness, citations, refusals), LLM-as-a-judge, RAGAS, tracing with Langfuse and OpenTelemetry, a systematic debugging loop and optimisation levers."
+---
+
+## "It looked good on five questions" is not evaluation
+
+<Level l="beginner" />
+
+RAG has many moving parts. When an answer is wrong, the cause could be parsing, chunking, the query, retrieval, the prompt or the model. You must **measure retrieval and generation separately** to know what to fix.
+
+```mermaid caption="Evaluate each half of the pipeline on its own. Retrieval metrics tell you whether the right text was found; generation metrics tell you what the model did with it."
+flowchart LR
+  G[(Golden set<br/>question · reference · source chunks)] --> R[Retriever]
+  R --> RM[Retrieval metrics<br/>hit@k · MRR · nDCG · context recall]
+  R --> L[LLM]
+  L --> GM[Generation metrics<br/>faithfulness · relevance · correctness · refusals]
+  L --> OM[Operational metrics<br/>p95 latency · cost · no-answer rate]
+```
+
+## Build a golden evaluation set
+
+<Level l="beginner" />
+
+Collect 50–300 realistic questions. For each, record:
+
+- the expected answer (or its key facts);
+- the source document(s) or chunk(s) that contain it;
+- tags — easy/hard, multi-hop, unanswerable, department.
+
+Sources: real user logs, subject-matter experts, and LLM-generated questions from your documents (reviewed by people — see the [deep dive](/learn/evaluation/deep-dive/)). **Include unanswerable questions**: a good system says "I don't know".
+
+## Retrieval metrics
+
+<Level l="intermediate" />
+
+| Metric | Question it answers |
+|---|---|
+| Hit rate / recall@k | Is at least one relevant chunk in the top k? (Recall@k: what fraction of *all* relevant chunks are in the top k?) |
+| Precision@k | What fraction of the top k is relevant? |
+| MRR (mean reciprocal rank) | How high is the *first* relevant result? (1 / rank, averaged) |
+| nDCG@k | Graded relevance, rewarding relevant results ranked higher |
+| Context recall / precision (LLM-judged) | Does the retrieved context contain all the facts needed? How much of it is noise? |
+
+<Example title="Worked example: MRR and hit rate">
+Three questions. The first relevant chunk is at rank 1, rank 3, and not found (counts as 0).
+
+MRR = (1/1 + 1/3 + 0) / 3 = **0.444**. Hit@5 = 2/3 = **0.667**.
+</Example>
+
+<Example title="Worked example: nDCG">
+Graded relevance (0–3) of the top 4 results, in the order returned: **3, 2, 0, 1**.
+
+DCG adds each grade divided by log₂(rank + 1): 3/1 + 2/1.585 + 0/2 + 1/2.322 = **4.69**.
+
+The ideal order is 3, 2, 1, 0: 3 + 1.262 + 1/2 + 0 = **4.76**.
+
+nDCG@4 = 4.69 / 4.76 = **0.985** — nearly ideal; it only loses a little for ranking the grade-1 result below an irrelevant one.
+</Example>
+
+A simple, framework-free retrieval evaluator:
+
+```python title="retrieval_eval.py"
+def retrieval_eval(golden, retriever, k=5):
+    hits, rr = 0, 0.0
+    for item in golden:                                   # item["source_ids"]: ids of relevant chunks
+        got = [d.metadata["chunk_id"] for d in retriever.invoke(item["question"])[:k]]
+        ranks = [i + 1 for i, cid in enumerate(got) if cid in item["source_ids"]]
+        hits += bool(ranks)
+        rr += 1 / ranks[0] if ranks else 0
+    n = len(golden)
+    return {"hit@k": hits / n, "mrr": rr / n}
+```
+
+## Generation metrics
+
+<Level l="intermediate" />
+
+| Metric | Meaning | How it's measured |
+|---|---|---|
+| **Faithfulness** (groundedness) | Every claim in the answer is supported by the retrieved context | An LLM judge splits the answer into claims and checks each |
+| **Answer relevance** | It answers the actual question | LLM judge or embedding similarity |
+| Answer correctness | Matches the reference answer | LLM judge against the reference; F1 on key facts |
+| Citation accuracy | Cited sources actually support the claims | Check each citation |
+| Refusal correctness | Says "don't know" for unanswerable questions, answers the rest | A labelled unanswerable set |
+
+Add **operational metrics** too: p50/p95 latency, cost per query, tokens, the "no answer" rate and user feedback.
+
+### LLM-as-a-judge
+
+Use a strong LLM with a precise rubric to grade outputs. Good practice:
+
+- explicit criteria and a 1–5 or pass/fail scale;
+- reasoning **before** the score;
+- pairwise comparisons for A/B tests, with the order randomised (position bias);
+- spot-check the judge against human labels before trusting it.
+
+The [deep dive](/learn/evaluation/deep-dive/) has a full judge prompt and shows how to validate it.
+
+### Evaluation frameworks
+
+RAGAS, DeepEval, TruLens, Arize Phoenix, LangSmith evaluators and promptfoo all implement these metrics.
+
+```python title="ragas_eval.py"
+# pip install ragas
+from ragas import EvaluationDataset, evaluate
+from ragas.metrics import (Faithfulness, LLMContextPrecisionWithReference,
+                           LLMContextRecall, ResponseRelevancy)
+
+rows = []
+for item in golden:                                       # {"question", "reference"}
+    docs = retriever.invoke(item["question"])
+    answer = rag_chain.invoke(item["question"])
+    rows.append({"user_input": item["question"], "response": answer,
+                 "retrieved_contexts": [d.page_content for d in docs],
+                 "reference": item["reference"]})
+
+result = evaluate(EvaluationDataset.from_list(rows),
+                  metrics=[Faithfulness(), ResponseRelevancy(), LLMContextRecall(),
+                           LLMContextPrecisionWithReference()],
+                  llm=judge_llm, embeddings=judge_embeddings)
+print(result)
+result.to_pandas().to_csv("eval_run_v3.csv")
+```
+
+## Tracing: see what happened on every request
+
+<Level l="intermediate" />
+
+A **trace** records every step of one request — the rewritten query, the retrieved chunks with scores, the final prompt, tokens, latency and cost — as nested **spans**. Without traces, you can't tell whether a bad answer came from retrieval or generation.
+
+### Langfuse
+
+Langfuse is an open-source LLM observability platform (self-host or cloud). Decorate your functions and it builds the trace tree:
+
+```python title="traced_rag.py"
+# pip install langfuse    — set LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
+from langfuse import get_client, observe
+
+langfuse = get_client()
+
+@observe(name="retrieve")
+def retrieve(q: str):
+    return hybrid_search(q)                               # inputs, outputs and timing are captured
+
+@observe(name="generate", as_type="generation")
+def generate(q: str, docs):
+    return llm_answer(q, docs)
+
+@observe(name="ask")
+def ask(q: str, user_id: str, session_id: str):
+    langfuse.update_current_trace(user_id=user_id, session_id=session_id, tags=["policy-bot"])
+    docs = retrieve(q)
+    return generate(q, docs)
+```
+
+Langfuse also stores user feedback scores against traces, runs LLM-judge evaluations on sampled traffic, and versions prompts.
+
+### OpenTelemetry for LLMs
+
+If your company already uses OpenTelemetry (with Jaeger, Grafana Tempo, Datadog or Honeycomb), emit LLM spans there using the **GenAI semantic conventions** — standard attribute names for model, tokens and operation:
+
+```python title="otel_llm.py"
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))   # OTEL_EXPORTER_OTLP_ENDPOINT
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("policy-assistant")
+
+def call_llm(model: str, messages: list[dict]):
+    with tracer.start_as_current_span(f"chat {model}") as span:
+        span.set_attribute("gen_ai.operation.name", "chat")
+        span.set_attribute("gen_ai.request.model", model)
+        resp = client.messages.create(model=model, max_tokens=600, messages=messages)
+        span.set_attribute("gen_ai.usage.input_tokens", resp.usage.input_tokens)
+        span.set_attribute("gen_ai.usage.output_tokens", resp.usage.output_tokens)
+        return resp
+```
+
+Libraries such as OpenLLMetry and OpenInference auto-instrument popular SDKs with these attributes, and Langfuse, Phoenix and others accept OpenTelemetry traces directly.
+
+<Pitfall>
+Traces contain prompts and answers — often **personal data**. Redact before export, restrict who can view traces, and set a retention period ([LLM security](/learn/alignment-safety/deep-dive/)).
+</Pitfall>
+
+## Debugging RAG: a systematic loop
+
+<Level l="intermediate" />
+
+1. Run the golden set and sort the failures.
+2. For each failure, open the trace and ask: **was the right chunk retrieved?**
+   - **No → a retrieval problem.** Check parsing (is the text even there?), chunking, query rewriting, hybrid search, the embedding model, k, and filters.
+   - **Yes, but the answer is wrong → a generation problem.** Check prompt clarity, context order and length, model strength, temperature, and conflicting chunks.
+3. Change **one thing at a time**, re-run, compare metrics, and keep a results log.
+
+| Symptom | Likely cause | Try |
+|---|---|---|
+| Correct document never retrieved | Parsing failure, wrong chunking, vocabulary gap | Inspect chunks; add BM25; contextual headers; multi-query |
+| Retrieved but ranked 8th | Weak first-stage ranking | Cross-encoder re-ranking |
+| Answer mixes two policies | Chunks from different documents or versions | Metadata filters; de-duplication; version metadata |
+| Hallucinated details | Weak grounding | Stricter prompt, citations, faithfulness check, lower temperature |
+| Says "don't know" when the answer exists | Over-strict threshold, missing context | Lower threshold, larger k, parent–child |
+| Slow | Big model, too many chunks, no caching | Smaller rewriter, fewer chunks, semantic cache, streaming |
+
+## Optimisation levers
+
+<Level l="intermediate" />
+
+- **Quality:** better parsing → chunking → hybrid search + re-ranking → prompt → model. Measure each step.
+- **Latency:** run retrievers in parallel; cache embeddings and frequent answers; stream; use a fast model for query rewriting; keep context short.
+- **Cost:** fewer, re-ranked chunks; prompt caching for long fixed system prompts; model routing (cheap model first, escalate when confidence is low); batch offline work.
+- **Continuous improvement:** log real queries and feedback → add hard cases to the golden set → re-evaluate on every change in CI. Treat prompts, chunking settings and model versions like code.
+
+<Interview>
+<QA q="How do you evaluate a RAG system?">
+Build a golden set with references, source chunks and unanswerable questions. Measure retrieval (hit@k, MRR, context recall) and generation (faithfulness, relevance, correctness, refusal accuracy) separately, plus latency and cost. Run it in CI on every change, and add production failures to the set.
+</QA>
+<QA q="An answer is wrong. How do you find out why?">
+Open the trace. If the right chunk wasn't retrieved, it's a retrieval problem — parsing, chunking, query or index. If it was retrieved and the answer is still wrong, it's generation — prompt, context order, model or conflicting sources.
+</QA>
+<QA q="What is faithfulness and how is it measured?">
+Whether every claim in the answer is supported by the retrieved context. An LLM judge splits the answer into atomic claims and checks each against the context; the score is the fraction supported.
+</QA>
+</Interview>
+
+<Takeaways>
+- Evaluate retrieval (hit rate, MRR, nDCG, context recall) and generation (faithfulness, relevance, correctness) separately.
+- Build a golden set that includes unanswerable questions, and automate it in CI.
+- Trace every request (Langfuse or OpenTelemetry); "was the right chunk retrieved?" decides where to look.
+</Takeaways>
