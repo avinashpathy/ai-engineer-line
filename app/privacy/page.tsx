@@ -10,7 +10,7 @@ export default function Privacy() {
         <ul>
           <li><strong>Without an account:</strong> nothing leaves your browser. Completed lessons are kept in your browser&apos;s local storage.</li>
           <li><strong>With an account:</strong> your email address (from the sign-in method you chose) and a list of lesson IDs you marked complete, with the time you did it. Nothing else.</li>
-          <li>No passwords are ever stored: sign-in uses GitHub, Google or a one-time email link.</li>
+          <li>No passwords are ever stored: sign-in uses a one-time email link (or GitHub or Google, where the site has them switched on).</li>
           <li>No ads, no third-party trackers, no selling of data.</li>
         </ul>
         <h2>How it&apos;s protected</h2>
