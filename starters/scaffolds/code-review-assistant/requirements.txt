@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+openai
+tree-sitter
+tree-sitter-python
+rank-bm25
+sentence-transformers
+qdrant-client
+PyGithub
+python-dotenv
+pytest
+httpx

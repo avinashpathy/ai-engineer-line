@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+openai
+pymupdf4llm
+sentence-transformers
+rapidfuzz
+streamlit
+python-dotenv
+pytest
+httpx

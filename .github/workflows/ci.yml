@@ -22,3 +22,18 @@ jobs:
       - run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  starter-projects:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install openai python-dotenv pypdf numpy pytest
+      - name: Test the three starter projects (fake models, no API keys)
+        run: |
+          for d in starters/s1-first-chatbot starters/s2-ask-a-pdf starters/s3-first-agent; do
+            (cd "$d" && python -m pytest -q)
+          done

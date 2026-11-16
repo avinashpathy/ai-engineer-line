@@ -1,6 +1,6 @@
 # AI Engineer Line
 
-A free, structured website for people who want to become AI Engineers, laid out like a metro map: six lines (Foundations, LLM Engineering, RAG, Agents, Production, Career), 32 stations, beginner-to-advanced lessons with diagrams, eleven production-ready projects, a 26-week roadmap and a glossary.
+A free, structured website for people who want to become AI Engineers, laid out like a metro map: six lines (Foundations, LLM Engineering, RAG, Agents, Production, Career), 32 stations, beginner-to-advanced lessons with diagrams, three starter projects with complete code, eleven production-ready projects, a 26-week roadmap and a glossary.
 
 Anyone can read everything. Signing in (GitHub, Google or email link) saves lesson progress across devices.
 
@@ -42,6 +42,13 @@ lib/glossary.ts      glossary terms
 supabase/migrations  database table + Row Level Security policies
 security-headers.json  one source for all security headers (generates vercel.json and public/_headers)
 ```
+
+## Beginner support
+
+- Every lesson after Foundations opens with an **In plain English** box (`<PlainEnglish>`).
+- The first time a glossary term appears in a lesson, `remarkGlossary` (`lib/mdx.tsx`) wraps it so hovering or tapping shows the definition. Add terms in `lib/glossary.ts`; control matching with `TERM_ALIASES`.
+- Deep dives are marked **optional on first read**, and the roadmap has a first-time path.
+- `starters/` holds the three starter projects (complete code, tested in CI with fake models) and a scaffold for each portfolio project.
 
 ## Roadmap coverage
 

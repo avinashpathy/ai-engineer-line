@@ -16,10 +16,6 @@ Two tools on top of one index of a code repository:
 1. **Codebase Q&A.** Developers ask "Where do we refresh OAuth tokens?" and get an answer with file paths and line ranges.
 2. **PR reviewer.** A GitHub Action that reviews pull requests using repository context, flagging real bugs, missing tests and convention violations as inline comments, and staying quiet otherwise.
 
-<Note title="Before you start">
-Finish the [R line](/learn/rag-foundations/) through [Advanced RAG](/learn/advanced-rag/). Pick a medium open-source Python repository (10k–50k lines) or one of your own. Time: 12–14 hours.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -29,6 +25,21 @@ Finish the [R line](/learn/rag-foundations/) through [Advanced RAG](/learn/advan
 | Reviewer precision (findings that are real issues) | ≥ 80% |
 | Reviewer recall on re-created historical bugs | Report it; raise it without dropping precision |
 | Comments per PR | ≤ 10, no style nitpicks |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | The [RAG line](/learn/rag-foundations/core/) through [Advanced RAG](/learn/advanced-rag/core/), and [Browser & coding agents](/learn/computer-use-agents/core/). |
+| **Accounts and keys** | A GitHub account and a fine-grained personal access token (read access to the repository; pull-request write access only for the review bot). An LLM API key. |
+| **Hardware** | Any laptop. |
+| **Expected cost** | Roughly ₹300–1,000 of API usage; reviewing only changed lines keeps it low. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2 weeks part-time (12–14 hours) |
+| **Starter files** | The [code-review-assistant scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/code-review-assistant) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -224,6 +235,20 @@ Build a reviewer benchmark from history: find 20 past PRs where a bug was later 
 - "Explain this PR" summaries for human reviewers.
 - Generate missing unit tests and run them inside the Action.
 - Expose the codebase Q&A as an MCP server so IDE assistants can use it (see [Project 08](/projects/openapi-mcp-server/)).
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| `403` from the GitHub API | The token lacks a permission | Create a fine-grained token with exactly the permissions the guide lists, for that repository only |
+| Answers cite the wrong function | Chunks split functions in half | Chunk by symbol (function or class) with the AST, as in the milestones |
+| The reviewer comments on every line | No confidence threshold or comment cap | Keep only high-confidence findings and cap comments per PR |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

@@ -15,10 +15,6 @@ PolicyPal answers employees' HR questions in a warm, concise company voice. When
 
 The twist that makes this a strong portfolio piece: you'll **fine-tune a small open model with QLoRA** and show, with numbers, when it matches a large API model at a fraction of the cost, and where it doesn't.
 
-<Note title="Before you start">
-Finish [Prompt engineering](/learn/prompt-engineering/), [LLM APIs](/learn/llm-apis/) and [Fine-tuning](/learn/fine-tuning/). Compute: a free Colab T4 is enough for a 1.5B model; a 24 GB GPU for 7–8B models. Expect 10–12 focused hours for the core, plus a week of polish.
-</Note>
-
 ### Success criteria
 
 Write these down before you write any code. They become your eval gates.
@@ -30,6 +26,21 @@ Write these down before you write any code. They become your eval gates.
 | Refusal accuracy on an adversarial set | ≥ 95% |
 | Cross-employee data leaks | 0 |
 | p95 latency | ≤ 2 s |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [Prompt engineering](/learn/prompt-engineering/core/), [LLM APIs](/learn/llm-apis/core/) and [Fine-tuning](/learn/fine-tuning/core/). Doing [Starter S1](/projects/s1-first-chatbot/) first helps. |
+| **Accounts and keys** | A free Hugging Face account (to download models and, optionally, publish your adapter). A Google account for Colab if you don't have a GPU. |
+| **Hardware** | A GPU for training: a free Colab T4 is enough for the 1.5B model; 24 GB of GPU memory for 7–8B models. Running the finished model works on a laptop CPU, slowly. |
+| **Expected cost** | ₹0 on free Colab. If you rent a GPU, budget for a few hours of a single-GPU machine. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2 weeks part-time |
+| **Starter files** | The [policypal-hr-assistant scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/policypal-hr-assistant) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -260,6 +271,21 @@ Run the whole suite in CI on every change to prompts, data or adapters.
 - Run a DPO pass on 200 preference pairs (chosen = on-tone, rejected = verbose) and measure the tone change.
 - Replace hand-rolled tool parsing with your model's native tool-calling API.
 - Add RAG over the real HR policy handbook (combine with Project 04).
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| `CUDA out of memory` while training | The batch or sequence length is too big for the GPU | Lower `per_device_train_batch_size` to 1, raise gradient accumulation, shorten the maximum sequence length, or use the 1.5B model |
+| Colab disconnects mid-training | Free sessions time out | Save checkpoints to Google Drive every few hundred steps and resume from the latest |
+| The fine-tuned model outputs broken JSON | Training data or chat template mismatch | Check every training example is valid JSON, apply the model's own chat template, and train on the answers only |
+| Loss drops to almost zero but answers get worse | Overfitting on a small dataset | Fewer epochs, a lower learning rate, and a held-out test set to stop early |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

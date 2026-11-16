@@ -1,5 +1,5 @@
 import { ALL_LESSONS, STATIONS, lineOf } from "@/lib/curriculum";
-import { availableLessonKeys, plainText, projects, readLesson, readProject } from "@/lib/content";
+import { availableLessonKeys, plainText, projectLabel, projects, readLesson, readProject, projectHref } from "@/lib/content";
 import { GLOSSARY } from "@/lib/glossary";
 
 export const dynamic = "force-static";
@@ -12,7 +12,7 @@ export function GET() {
       const { source } = readLesson(l.station, l.slug);
       return { href: `/learn/${l.key}/`, title: l.title, tag: `Lesson · ${STATIONS.find(s => s.id === l.station)!.short}`, line: l.line, text: (l.title + " " + plainText(source)).toLowerCase().slice(0, 6000) };
     }),
-    ...projects().map(p => ({ href: `/projects/${p.slug}/`, title: p.title, tag: `Project ${String(p.order).padStart(2, "0")}`, line: "", text: (p.title + " " + p.tagline + " " + plainText(readProject(p.slug).source)).toLowerCase().slice(0, 4000) })),
+    ...projects().map(p => ({ href: projectHref(p.slug), title: p.title, tag: `${p.starter ? "Starter" : "Project"} ${projectLabel(p)}`, line: "", text: (p.title + " " + p.tagline + " " + plainText(readProject(p.slug).source)).toLowerCase().slice(0, 4000) })),
     ...GLOSSARY.map(([t, d]) => ({ href: `/glossary/#g-${t[0].toUpperCase()}`, title: `${t}: ${d}`, tag: "Glossary", line: "", text: (t + " " + d).toLowerCase() })),
   ];
   return Response.json(entries);

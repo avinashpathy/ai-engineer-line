@@ -1,0 +1,279 @@
+---
+order: 0.3
+code: S3
+starter: true
+title: Your First Agent
+tagline: An agent that answers questions about your spending by deciding when to call a tool, reading the result and replying — the think, act, observe loop in about 100 lines, with a step limit.
+level: Beginner
+weeks: 1–2 evenings
+lines: [a]
+stack: [Python, OpenAI-compatible tool calling, Ollama or a hosted provider, CSV]
+skills: [Tool calling, The agent loop, Tool descriptions, Step limits, Handling tool errors]
+---
+
+## What you'll build
+
+A small **agent**: you ask a question in plain English, the model decides it needs data, asks your program to run a tool, reads the result and answers.
+
+```text title="what it looks like"
+$ python agent.py "How much did I spend on food in October 2026?"
+  step 1: query_expenses({'category': 'food', 'month': '2026-10'}) -> {"total_rupees": 4090.0, "count": 3, ...}
+
+You spent ₹4,090 on food in October 2026 across 3 purchases.
+```
+
+The model never touches your data directly. It only *asks* for the tool; your code decides whether to run it and what to send back. That separation is the heart of every safe agent.
+
+<Note title="Before you start">
+- **Python 3.10 or newer** and a terminal. New to this? Do [Python for AI](/learn/python-backend/python-for-ai/) first.
+- **A model to talk to — free options work.** Either install [Ollama](https://ollama.com) and run `ollama pull llama3.2` (a model that supports tool calling) (free, runs on your own computer, about 2 GB), or create a free API key with a hosted provider that offers an OpenAI-compatible API.
+- **The code:** download it from the [starters folder on GitHub](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters), or copy it from this page.
+- **Cost:** ₹0 with Ollama. A hosted provider's free tier is plenty for this project.
+- **Time:** 3–5 hours.
+</Note>
+
+### Set up (once)
+
+```bash title="terminal"
+cd starters/s3-first-agent
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                 # Windows: copy .env.example .env
+```
+
+Open `.env` and choose your provider. The defaults talk to Ollama on your own computer:
+
+| Provider | `LLM_BASE_URL` | `LLM_API_KEY` | `LLM_MODEL` |
+|---|---|---|---|
+| Ollama (free, local) | `http://localhost:11434/v1` | `ollama` | `llama3.2` |
+| A hosted provider | Its OpenAI-compatible URL (from its docs) | Your key | A model from its model list |
+
+<Pitfall>
+Never paste an API key into your code or commit `.env` to GitHub — the `.gitignore` in the starters folder already excludes it. If a key ever leaks, delete it in the provider's dashboard and create a new one.
+</Pitfall>
+
+
+## Step 1 — Run it
+
+```bash title="terminal"
+python agent.py "How much did I spend on transport in September 2026?"
+python agent.py
+```
+
+The second command starts an interactive session. Try questions that need no filter ("What's my total spending?"), two months ("Compare food in September and October"), and something the tool can't answer ("What's the weather?").
+
+## Step 2 — Understand the loop
+
+```mermaid caption="The agent loop. The model decides; your code acts; the step limit guarantees it stops."
+flowchart TD
+  Q[Your question] --> M[Model reads question + tool description]
+  M --> D{Wants a tool?}
+  D -- no --> A[Final answer]
+  D -- yes --> R[Your code checks the arguments and runs query_expenses]
+  R --> O[Result sent back to the model]
+  O --> L{Steps left?}
+  L -- yes --> M
+  L -- no --> S[Stop: step limit reached]
+```
+
+## Step 3 — Read the code
+
+```python title="agent.py"
+"""Starter project S3 - your first agent.
+
+A small agent that answers questions about your spending. It has ONE tool,
+query_expenses, which reads expenses.csv. The model decides when to call it and
+with which filters; this program runs the tool and sends the result back.
+
+Run:  python agent.py "How much did I spend on food in October 2026?"
+"""
+import csv
+import json
+import os
+import sys
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+API_KEY = os.getenv("LLM_API_KEY", "ollama")
+MODEL = os.getenv("LLM_MODEL", "llama3.2")   # pick a model that supports tool calling
+MAX_STEPS = 5                                 # the agent must finish within this many model calls
+CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "expenses.csv")
+CATEGORIES = ["food", "transport", "bills", "shopping"]
+
+
+# ---------- the tool: ordinary Python ----------
+def query_expenses(category: str | None = None, month: str | None = None) -> dict:
+    """Filter expenses by category and/or month (YYYY-MM) and return the total, count and items."""
+    if category is not None and category not in CATEGORIES:
+        return {"error": f"Unknown category '{category}'. Use one of {CATEGORIES}, or leave it out."}
+    if month is not None and (len(month) != 7 or month[4] != "-"):
+        return {"error": "month must look like 2026-10 (YYYY-MM)."}
+    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+        rows = [r for r in csv.DictReader(f)
+                if (category is None or r["category"] == category)
+                and (month is None or r["date"].startswith(month))]
+    total = sum(float(r["amount"]) for r in rows)
+    return {"total_rupees": total, "count": len(rows),
+            "items": [f"{r['date']} {r['description']} ₹{r['amount']}" for r in rows][:10]}
+
+
+# ---------- how the model learns about the tool ----------
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "query_expenses",
+        "description": ("Look up the user's expenses. Use it for any question about how much was spent. "
+                        "Filter by category and/or month; leave a filter out to include everything. "
+                        "Returns the total in rupees, the number of expenses and up to 10 items."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": CATEGORIES, "description": "Spending category."},
+                "month": {"type": "string", "description": "Month as YYYY-MM, for example 2026-10."},
+            },
+        },
+    },
+}]
+
+SYSTEM = ("You help the user understand their spending. Always use the query_expenses tool for numbers - "
+          "never guess. Amounts are in Indian rupees. Answer in one or two short sentences.")
+
+
+# ---------- the agent loop ----------
+def run_agent(client, question: str, verbose: bool = True) -> str:
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}]
+    for step in range(1, MAX_STEPS + 1):
+        resp = client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS, temperature=0)
+        msg = resp.choices[0].message
+        if not msg.tool_calls:                          # no tool requested: this is the final answer
+            return msg.content or ""
+        messages.append({"role": "assistant", "content": msg.content or "",
+                         "tool_calls": [tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in msg.tool_calls]})
+        for call in msg.tool_calls:
+            args = {}
+            try:
+                args = json.loads(call.function.arguments or "{}")
+                result = (query_expenses(**args) if call.function.name == "query_expenses"
+                          else {"error": f"No tool named {call.function.name}"})
+            except (json.JSONDecodeError, TypeError) as e:
+                result = {"error": f"Bad arguments: {e}"}   # tell the model, so it can try again
+            if verbose:
+                print(f"  step {step}: {call.function.name}({args}) -> {json.dumps(result, ensure_ascii=False)[:120]}")
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
+    return "I stopped because I reached my step limit. Try asking a simpler question."
+
+
+def main(argv: list[str]) -> int:
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    questions = [" ".join(argv)] if argv else []
+    if not questions:
+        print("Ask about your spending (empty line to quit).")
+    while True:
+        q = questions.pop() if questions else input("\nQuestion: ").strip()
+        if not q:
+            return 0
+        try:
+            print("\n" + run_agent(client, q))
+        except Exception as e:
+            print(f"[error] {e}")
+        if argv:
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+```
+
+**How it works:**
+
+1. **The tool is ordinary Python.** `query_expenses` filters the CSV and returns a small summary. It checks its inputs and returns a helpful error message instead of crashing.
+2. **The model learns about the tool from `TOOLS`** — a name, a description and a schema of allowed arguments. The description is effectively a prompt: it says *when* to use the tool and what it returns. Vague descriptions are the most common reason agents misuse tools ([tool calling](/learn/agent-foundations/core/)).
+3. **The loop.** Each turn, the model either answers (done) or requests tool calls. Your code runs each one, appends the result as a `tool` message, and asks again.
+4. **Errors become information.** Bad arguments or an unknown tool produce an error message the model can read and correct, instead of crashing the program.
+5. **The step limit.** `MAX_STEPS = 5` guarantees the agent stops even if the model keeps asking for tools. Every real agent needs limits enforced in code, not in the prompt.
+
+## Step 4 — Run the tests
+
+```bash title="terminal"
+python -m pytest -q
+```
+
+The tests script the model's replies, so they check the loop itself: the tool filters correctly, rejects bad input helpfully, the agent answers after one tool call, and it stops at the step limit.
+
+```python title="test_agent.py"
+"""Tests that run without any model: python -m pytest -q"""
+import json
+from types import SimpleNamespace
+
+import agent
+
+
+def test_tool_filters_by_category_and_month():
+    r = agent.query_expenses(category="food", month="2026-10")
+    assert r["count"] == 3 and r["total_rupees"] == 2100 + 350 + 1640
+
+
+def test_tool_rejects_bad_input_helpfully():
+    assert "Unknown category" in agent.query_expenses(category="rent")["error"]
+    assert "YYYY-MM" in agent.query_expenses(month="October")["error"]
+
+
+def scripted_client(replies):
+    it = iter(replies)
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: SimpleNamespace(choices=[SimpleNamespace(message=next(it))]))))
+
+
+def tool_call(args):
+    fn = SimpleNamespace(name="query_expenses", arguments=json.dumps(args))
+    return SimpleNamespace(id="call_1", type="function", function=fn,
+                           model_dump=lambda: {"id": "call_1", "type": "function",
+                                               "function": {"name": "query_expenses", "arguments": json.dumps(args)}})
+
+
+def test_agent_calls_tool_then_answers():
+    client = scripted_client([
+        SimpleNamespace(content=None, tool_calls=[tool_call({"category": "food", "month": "2026-10"})]),
+        SimpleNamespace(content="You spent ₹4,090 on food in October 2026.", tool_calls=None),
+    ])
+    assert agent.run_agent(client, "food in October?", verbose=False).startswith("You spent ₹4,090")
+
+
+def test_agent_stops_at_step_limit():
+    looping = [SimpleNamespace(content=None, tool_calls=[tool_call({})]) for _ in range(agent.MAX_STEPS)]
+    assert "step limit" in agent.run_agent(scripted_client(looping), "loop forever", verbose=False)
+```
+
+## Step 5 — Extend it
+
+1. **Add a second tool**, `add_expense(date, category, description, amount)`, that appends to the CSV. Before writing, print the expense and ask `Save this? (y/n)` — your first **human approval** step ([agent patterns](/learn/agent-patterns/core/)).
+2. **Watch the reasoning.** Ask "Compare my food spending in September and October". How many tool calls does it make? Does it do the subtraction correctly, or would a calculator tool help?
+3. **Break the description.** Shorten the tool description to just "expenses". Do the answers get worse? This shows why descriptions matter.
+4. **Try a weaker and a stronger model.** Small local models sometimes call tools with wrong arguments; notice how the error messages help them recover.
+
+## Stuck?
+
+| What you see | What it means | Fix |
+|---|---|---|
+| `Connection error` / `Connection refused` | Nothing is answering at `LLM_BASE_URL` | Start Ollama (open the app, or run `ollama serve`), or check the URL in `.env` |
+| `model "…" not found` / `404` | The model name doesn't exist on your provider | Run `ollama list` (or check the provider's model list) and copy the exact name into `LLM_MODEL` |
+| `401 Unauthorized` / `invalid api key` | The key is wrong or missing | Copy the key again into `.env`, with no quotes or spaces; make sure the file is called `.env` |
+| `429 Too Many Requests` | You hit the free tier's rate limit | Wait a minute and try again |
+| `ModuleNotFoundError` | The packages aren't installed in the active environment | Activate `.venv` again and re-run `pip install -r requirements.txt` |
+| Replies are very slow | A local model is running on a laptop CPU | Use a smaller model, or a hosted provider |
+| The model answers without calling the tool, or invents numbers | Small models don't always use tools | Use a model that supports tool calling (check its model card), keep `temperature=0`, or try a larger model |
+| `does not support tools` | The model you chose has no tool calling | Switch `LLM_MODEL` to one that does, such as `llama3.2` or `qwen2.5` in Ollama |
+| "I stopped because I reached my step limit" | The model kept requesting tools | Read the printed steps — usually the arguments were wrong. Improve the tool description, or raise `MAX_STEPS` slightly |
+
+Still stuck? Run the tests (`python -m pytest -q`) — they check your files without needing a model, so a failure points at the code rather than your setup.
+
+
+## What you learned
+
+- An agent is a loop: the model chooses a tool, your code runs it, the result goes back, repeat.
+- Tool descriptions are prompts; tool code validates inputs; limits are enforced in code.
+- **Next:** [Agents: foundations](/learn/agent-foundations/core/), then the portfolio projects — start with [Project 02 · Resume–Job Matcher](/projects/resume-jd-matcher/).

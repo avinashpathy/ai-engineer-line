@@ -15,10 +15,6 @@ A generator that reads an **OpenAPI specification** and exposes the API as a **w
 
 **Why it stands out:** enterprises have hundreds of internal REST APIs, and "make our APIs usable by agents" is one of the most common AI-engineering tasks today. If you've done API integration work, this project turns that experience directly into AI-engineering proof.
 
-<Note title="Before you start">
-Finish [MCP](/learn/mcp/) and [Agent patterns](/learn/agent-patterns/). Time: 12–15 hours.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -27,6 +23,21 @@ Finish [MCP](/learn/mcp/) and [Agent patterns](/learn/agent-patterns/). Time: 12
 | Improvement from curation vs raw generated tools | Measured and reported |
 | Write actions without user confirmation | 0 |
 | Every call audit-logged with tool, risk and caller | 100% |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [MCP](/learn/mcp/core/), [Agent patterns](/learn/agent-patterns/core/) and [OAuth and JWT](/learn/python-backend/production-backend/). |
+| **Accounts and keys** | An LLM API key for testing with an agent. An OpenAPI spec to work from (the guide suggests a public sample API). |
+| **Hardware** | Any laptop. |
+| **Expected cost** | Roughly ₹200–600 of API usage for the tool-selection evaluation. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2 weeks part-time (12–15 hours) |
+| **Starter files** | The [openapi-mcp-server scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/openapi-mcp-server) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -297,6 +308,20 @@ Serve over streamable HTTP so many clients can share one server. Put it behind y
 - Generate servers for two real SaaS APIs you've worked with.
 - Compare your curated generator with an off-the-shelf OpenAPI-to-MCP tool.
 - Publish the generator as an open-source CLI.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| The MCP Inspector shows no tools | The server crashed on start or printed to stdout | Run the server directly to see the error; with stdio, log to stderr, never print to stdout |
+| The agent picks the wrong tool | Too many similar tools or vague descriptions | Curate fewer, higher-level tools and rewrite descriptions to say when to use each |
+| `401` from the target API | Client-credentials token missing or expired | Fetch and cache the token, refresh it before expiry, and never pass it through the model |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

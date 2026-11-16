@@ -28,6 +28,21 @@ This is one of the most common real-world GenAI workloads ("document AI"), and i
 | Straight-through processing (auto-approved share) | Report it; raise it only while errors stay low |
 | Cost and latency per page | Measured and shown on a dashboard |
 
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [LLM APIs](/learn/llm-apis/core/), [Multimodal AI](/learn/multimodal-voice/multimodal/) and [Full-stack LLM apps](/learn/full-stack-apps/core/). |
+| **Accounts and keys** | An API key for a provider with a vision model (or a local vision model in Ollama). Docker Desktop installed. |
+| **Hardware** | Any laptop with Docker. Local vision models need a decent GPU or lots of patience. |
+| **Expected cost** | Vision calls cost more than text: budget roughly ₹200–800 to process your test set a few times. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2 weeks part-time (10–12 hours for the core) |
+| **Starter files** | The [document-extraction scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/document-extraction) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
+
 ## Architecture
 
 ```mermaid caption="Uploads return immediately; a worker does the slow model work. Corrections flow back as few-shot examples and eval data."
@@ -231,6 +246,20 @@ Docker Compose with `api`, `worker`, `postgres`, `redis` and `review-ui` for loc
 - Multi-page invoices with line items spanning pages.
 - Push approved invoices to a mock ERP through its REST API.
 - Compare against a managed document-AI service on cost and accuracy.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Totals don't add up in extracted data | The model misread a number | That's what the validation step is for: check sums, flag mismatches, route them to review instead of trusting them |
+| Jobs stay in 'queued' forever | The worker isn't running or can't reach Redis | Check `docker compose ps`, and that the worker uses the same Redis URL as the API |
+| Image too large / request rejected | Page images exceed the provider's limit | Render pages at a lower resolution (about 150 DPI) and crop margins |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

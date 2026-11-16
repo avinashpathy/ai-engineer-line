@@ -50,11 +50,19 @@ export function stationReady(id: string) {
 export interface ProjectMeta {
   slug: string; order: number; title: string; tagline: string; level: string; weeks: string;
   lines: string[]; stack: string[]; skills: string[];
+  code?: string; starter?: boolean;   // starter projects show "S1" instead of a number
 }
+/** The URL of a project page. Only simple lowercase slugs are allowed into a link. */
+export function projectHref(slug: string): string {
+  return /^[a-z0-9-]+$/.test(slug) ? `/projects/${slug}/` : "/projects/";
+}
+/** "S1" for starter projects, otherwise the zero-padded number: "04". */
+export const projectLabel = (p: { order: number; code?: string }) => p.code ?? String(p.order).padStart(2, "0");
 export function projects(): ProjectMeta[] {
   const dir = path.join(ROOT, "projects");
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(f => f.endsWith(".mdx")).map(f => {
+  // Slugs become URLs, so only allow simple lowercase names (defence in depth: files come from this repo).
+  return fs.readdirSync(dir).filter(f => /^[a-z0-9-]+\.mdx$/.test(f)).map(f => {
     const { data } = matter(fs.readFileSync(path.join(dir, f), "utf8"));
     return { slug: f.replace(/\.mdx$/, ""), ...(data as Omit<ProjectMeta, "slug">) };
   }).sort((a, b) => a.order - b.order);

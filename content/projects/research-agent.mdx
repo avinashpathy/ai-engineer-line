@@ -15,10 +15,6 @@ Ask a business research question, like *"How are Indian mid-size companies adopt
 
 This project is the clearest demonstration of advanced orchestration: fan-out, human interrupts, verification loops and budgets.
 
-<Note title="Before you start">
-Finish [LangGraph](/learn/langgraph/) and [Agent patterns](/learn/agent-patterns/). You'll need an API key for a web search service. Time: 12–16 hours.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -27,6 +23,21 @@ Finish [LangGraph](/learn/langgraph/) and [Agent patterns](/learn/agent-patterns
 | Claim support (sampled, judge + human) | ≥ 90% |
 | Coverage of every sub-question (judge, 1–5) | ≥ 4 |
 | Cost per report | Under a hard cap you set, e.g. $1 |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [LangGraph](/learn/langgraph/core/) and [Agent patterns](/learn/agent-patterns/core/). |
+| **Accounts and keys** | An LLM API key and an API key for a web search service (several offer free tiers). |
+| **Hardware** | Any laptop. |
+| **Expected cost** | Roughly ₹500–1,500: each report makes many model and search calls, so set a budget per report. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2–3 weeks part-time (12–16 hours) |
+| **Starter files** | The [research-agent scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/research-agent) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -224,6 +235,20 @@ Run **ablations**: without the critic, without human plan review, and with a sin
 - Add an internal-documents researcher by calling your [Project 04](/projects/policy-rag/) RAG as a tool through MCP.
 - Let users chat with the finished report.
 - Weekly "monitoring" runs that diff new findings against last week's report.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Reports cite pages that don't say what's claimed | Claims aren't checked against sources | Keep the citation-verification step: fuzzy-match each quoted claim against the fetched page text |
+| A run never finishes | No step or budget limit | Set `recursion_limit` and a cost budget in state; route to the writer when either is reached |
+| Fetched pages are empty | The site blocks scrapers or needs JavaScript | Skip it and use another source; respect robots.txt and rate limits |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

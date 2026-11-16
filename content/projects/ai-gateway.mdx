@@ -30,6 +30,21 @@ Use two models from one provider (a small one and a large one) plus one model fr
 | Routing: quality vs always using the large model | Within 2 points on your golden set |
 | Routing + caching: cost vs always using the large model | ≥ 40% lower |
 
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [LLM APIs](/learn/llm-apis/core/), [Observability](/learn/observability/core/) and [Deployment & CI/CD](/learn/deployment-cicd/deep-dive/). |
+| **Accounts and keys** | API keys for two providers (one main, one fallback). Docker Desktop. |
+| **Hardware** | Any laptop. |
+| **Expected cost** | A few hundred rupees of API credit; the load and chaos tests use a free mock provider. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 2 weeks part-time (12–16 hours for the core) |
+| **Starter files** | The [ai-gateway scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/ai-gateway) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
+
 ## Architecture
 
 ```mermaid caption="Every request passes the same checks in order. Cheap checks (auth, budget, cache) run before anything is sent to a provider."
@@ -420,6 +435,20 @@ Run the gateway on a container platform with at least two replicas behind a laye
 - **Prefix-aware routing** to self-hosted vLLM replicas for cache reuse.
 - **Batch endpoint** that queues offline jobs for the provider's batch API at a lower price.
 - Expose the gateway as the single model endpoint for your other projects, and show their combined cost dashboard.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Users get 429 even though they've barely used anything | Reserved tokens weren't settled after a failure | Always call `settle` in a `finally` block, including on errors |
+| Grafana shows no data | Prometheus can't scrape the gateway | Check the scrape target in `prometheus.yml` matches the gateway's service name and port, and open `/metrics` |
+| The cache returns a wrong answer | Threshold too low or scope too wide | Raise the threshold, re-run the tricky-pairs test, and check the scope includes team, model and system prompt |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

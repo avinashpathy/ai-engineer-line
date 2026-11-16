@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+websockets
+pydantic
+openai
+numpy
+webrtcvad
+asyncpg
+python-dotenv
+pytest
+httpx

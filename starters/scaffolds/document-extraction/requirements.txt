@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+openai
+pymupdf
+arq
+redis
+asyncpg
+streamlit
+python-dotenv
+pytest
+httpx

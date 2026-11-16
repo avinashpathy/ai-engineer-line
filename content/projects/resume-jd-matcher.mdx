@@ -15,10 +15,6 @@ Upload a résumé (PDF) and paste a job description. The system extracts **struc
 
 It's a great first full project because it touches every core LLM-engineering skill, and because it has a built-in trap: LLMs love to "improve" résumés by inventing achievements. Your job is to make that impossible.
 
-<Note title="Before you start">
-Finish [LLM APIs](/learn/llm-apis/) (structured outputs) and [Prompt engineering](/learn/prompt-engineering/). Time: 8–10 hours for the core.
-</Note>
-
 ### Success criteria
 
 | Metric | Target |
@@ -28,6 +24,21 @@ Finish [LLM APIs](/learn/llm-apis/) (structured outputs) and [Prompt engineering
 | Evidence precision (quotes that exist in the résumé) | ≥ 98% after verification |
 | Fairness: change only name and pronouns | Score change within run-to-run noise |
 | Invented facts in suggested bullets | 0 |
+
+## Before you start
+
+| You need | Details |
+|---|---|
+| **Know first** | [LLM APIs](/learn/llm-apis/core/) (structured outputs) and [Prompt engineering](/learn/prompt-engineering/core/). [Starter S1](/projects/s1-first-chatbot/) is a good warm-up. |
+| **Accounts and keys** | An API key for one LLM provider, or Ollama installed locally. |
+| **Hardware** | Any laptop. The embedding model runs on CPU. |
+| **Expected cost** | Roughly ₹0–300 of API usage while developing, or ₹0 with a local model. Prices change, so check your provider's current rates, and set a spending limit in its dashboard. |
+| **Time** | 1–2 weeks part-time (8–10 hours for the core) |
+| **Starter files** | The [resume-jd-matcher scaffold](https://github.com/avinashpathy/ai-engineer-line/tree/main/starters/scaffolds/resume-jd-matcher) has the folder layout, `requirements.txt`, `.env.example` and a milestone checklist to tick off. |
+
+<Tip>
+Never done a project like this? Build the matching starter project first — [S1 chatbot](/projects/s1-first-chatbot/), [S2 ask your document](/projects/s2-ask-a-pdf/) or [S3 first agent](/projects/s3-first-agent/) — then come back. Work one milestone at a time, and commit to Git after each one so you can always go back.
+</Tip>
 
 ## Architecture
 
@@ -262,6 +273,20 @@ Containerise the FastAPI service and the Streamlit UI separately, deploy both to
 - Cover-letter drafting grounded in the matched evidence.
 - Store profiles in Postgres with pgvector for semantic candidate search.
 - A Next.js front end.
+
+## Stuck?
+
+| What you see | What it usually means | Fix |
+|---|---|---|
+| Résumé text comes out jumbled | Two-column PDFs confuse simple extractors | Use `pymupdf4llm` (as in the guide), or test with single-column résumés first |
+| `ValidationError` from Pydantic | The model's JSON doesn't match your schema | Use structured outputs or a forced tool call, and retry once with the validation error in the prompt |
+| Scores look random | Comparing whole documents instead of skills | Extract skills into lists first, then match skill by skill, as the milestones describe |
+| `ModuleNotFoundError` | The virtual environment isn't active, or a package is missing | Activate `.venv` and re-run `pip install -r requirements.txt` |
+| `401` / `invalid api key` | The key in `.env` is wrong or not loaded | Re-copy the key with no quotes or spaces; check the file is named `.env` and is loaded |
+| `429 Too Many Requests` | Provider rate limit | Add retries with backoff, slow down batch jobs, or wait a minute |
+| A Docker service won't start | Port already in use, or a bad environment variable | Run `docker compose logs <service>`; stop whatever else uses the port |
+
+Still stuck? Go back to the last milestone that worked (that's why you commit after each one), read the full error message from the bottom up, and check the trace or logs for the failing step. The lessons linked in **Know first** cover every technique used here.
 
 ## Show it off
 

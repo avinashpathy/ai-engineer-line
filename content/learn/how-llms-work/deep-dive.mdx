@@ -2,6 +2,14 @@
 summary: The engineering of serving LLMs — GPU memory maths, why decoding is memory-bound, prefill vs decode, throughput vs latency, quantisation, vLLM with PagedAttention and continuous batching, speculative decoding, prefix caching, long context, batch inference, GPU-vs-API cost and the levers that cut your bill.
 ---
 
+<PlainEnglish>
+This lesson is about running models efficiently: how much memory they need, why the first word takes longer than the rest, and the tricks that make answers faster and cheaper. It matters once you pay the bills or host models yourself.
+
+**Think of it like:** Knowing how a restaurant kitchen is organised so you can serve more diners without hiring more cooks.
+
+**After this lesson you'll be able to** estimate a model's memory and cost, and choose between paying per request and running your own GPU.
+</PlainEnglish>
+
 ## Memory maths: will it fit?
 
 <Level l="advanced" />
