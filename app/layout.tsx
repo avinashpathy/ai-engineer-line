@@ -14,7 +14,7 @@ import { Footer } from "@/components/Footer";
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"),
   title: { default: "AI Engineer Line — learn AI engineering from zero to production", template: "%s · AI Engineer Line" },
-  description: "A free, structured curriculum for becoming an AI Engineer: foundations, LLMs, RAG, agents, production LLMOps, ten production-ready projects and interview prep.",
+  description: "A free, structured curriculum for becoming an AI Engineer: foundations, LLMs, RAG, agents, production LLMOps, eleven production-ready projects and interview prep.",
   openGraph: { type: "website", siteName: "AI Engineer Line" },
   referrer: "strict-origin-when-cross-origin",
 };

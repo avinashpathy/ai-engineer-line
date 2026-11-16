@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { projects } from "@/lib/content";
 import { STATIONS, lineOf, type LineId } from "@/lib/curriculum";
 
-export const metadata: Metadata = { title: "Projects", description: "Ten production-ready AI engineering projects with architecture, build steps, evaluation, security and deployment." };
+export const metadata: Metadata = { title: "Projects", description: "Eleven production-ready AI engineering projects with architecture, build steps, evaluation, security and deployment." };
 
 export default function Projects() {
   const ps = projects();

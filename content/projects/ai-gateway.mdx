@@ -1,0 +1,428 @@
+---
+order: 11
+title: AI Gateway
+tagline: One OpenAI-compatible API in front of several models, with routing, fallbacks, a semantic cache, per-user token budgets and a live latency-and-cost dashboard — the piece every company with more than one LLM app ends up needing.
+level: Advanced
+weeks: 2 weeks
+lines: [l, p]
+stack: [FastAPI, LiteLLM (provider SDK), Redis, PostgreSQL, sentence-transformers, Prometheus, Grafana, Docker Compose, k6]
+skills: [Model routing, Fallbacks and circuit breakers, Semantic caching, Token budgets and rate limits, Streaming proxies, Cost observability, Load testing]
+---
+
+## What you'll build
+
+A **gateway service** that every app in a company calls instead of calling model providers directly. Apps send standard OpenAI-style chat requests with their own **virtual key**; the gateway decides which model serves each request, retries or falls back when a provider fails, answers repeated questions from a **semantic cache**, enforces **per-user token budgets**, streams responses, and records latency and cost for a **dashboard**.
+
+You build the gateway logic yourself in FastAPI — using the LiteLLM library only as a uniform SDK for talking to providers — so you understand every decision. (In production you might run the LiteLLM proxy or a cloud gateway; see [Cloud LLMOps](/learn/cloud-llmops/core/). Having built one, you'll know exactly what to configure and what to check.)
+
+<Note title="Models and cost">
+Use two models from one provider (a small one and a large one) plus one model from a second provider as the fallback. A few dollars of API credit covers development; the load test uses a mock provider so it costs nothing. Time: 12–16 hours for the core.
+</Note>
+
+### Success criteria
+
+| Metric | Target |
+|---|---|
+| Gateway overhead (p95, excluding model time) | ≤ 50 ms |
+| Requests that succeed when the primary provider is down (chaos test) | 100% (via fallback) |
+| Requests served over a user's budget | 0 |
+| Semantic-cache false hits on a set of "similar but different" question pairs | ≤ 1% |
+| Routing: quality vs always using the large model | Within 2 points on your golden set |
+| Routing + caching: cost vs always using the large model | ≥ 40% lower |
+
+## Architecture
+
+```mermaid caption="Every request passes the same checks in order. Cheap checks (auth, budget, cache) run before anything is sent to a provider."
+flowchart TD
+  APP[Apps · OpenAI SDK with base_url = gateway] --> AUTH[Virtual key → user, team, limits]
+  AUTH --> RL{Rate limit and<br/>token budget OK?}
+  RL -- no --> R429[429 + Retry-After]
+  RL -- yes --> SC{Semantic cache hit?<br/>scoped by team + model + system prompt}
+  SC -- yes --> OUT[Response]
+  SC -- no --> RT[Router<br/>auto → small or large]
+  RT --> FB[Call with timeout<br/>retry · circuit breaker · fallback chain]
+  FB --> P1[Provider A · small]
+  FB --> P2[Provider A · large]
+  FB --> P3[Provider B · backup]
+  FB --> ACC[Settle tokens + cost<br/>store in cache]
+  ACC --> OUT
+  ACC -. metrics .-> PROM[(Prometheus)] --> GRAF[Grafana dashboard]
+  AUTH -. keys, usage .-> PG[(Postgres)]
+  RL -. counters .-> RED[(Redis)]
+  SC -. vectors .-> RED
+```
+
+## Milestones
+
+### 1. Services and configuration
+
+`docker-compose.yml` runs `gateway` (FastAPI), `redis`, `postgres`, `prometheus` and `grafana`. All model choices and prices live in one versioned file, so swapping a model is a config change:
+
+```yaml title="gateway.yaml"
+# Replace model names and prices (USD per 1M tokens) with current ones.
+models:
+  small:        { target: anthropic/claude-haiku-4-5,  price_in: 1.00, price_out: 5.00 }
+  large:        { target: anthropic/claude-sonnet-4-5, price_in: 3.00, price_out: 15.00 }
+  backup-small: { target: openai/gpt-4o-mini,          price_in: 0.15, price_out: 0.60 }
+fallbacks:
+  large: [small, backup-small]
+  small: [backup-small]
+routing:
+  auto: { simple: small, complex: large }
+cache:
+  threshold: 0.93
+  ttl_seconds: 86400
+timeouts:
+  first_token_s: 10
+  total_s: 60
+```
+
+Provider API keys exist **only** in the gateway's environment (from a secret manager). Apps never see them.
+
+### 2. Virtual keys
+
+Each app or person gets a gateway key. Store only its hash, plus the owner, team and limits:
+
+```sql title="schema.sql"
+CREATE TABLE api_keys (
+  id                 SERIAL PRIMARY KEY,
+  key_hash           TEXT UNIQUE NOT NULL,          -- sha256 of the key; the key itself is shown once
+  owner              TEXT NOT NULL,
+  team               TEXT NOT NULL,
+  daily_token_budget INTEGER NOT NULL DEFAULT 200000,
+  rpm_limit          INTEGER NOT NULL DEFAULT 60,
+  allowed_models     TEXT[] NOT NULL DEFAULT '{auto,small}',
+  active             BOOLEAN NOT NULL DEFAULT true,
+  created_at         TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE usage_log (                             -- one row per request, no prompt text
+  id BIGSERIAL PRIMARY KEY, key_id INT, model TEXT, served_by TEXT, cache_hit BOOLEAN,
+  tokens_in INT, tokens_out INT, cost_usd NUMERIC(12,6), latency_ms INT, status INT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+```python title="gateway/auth.py"
+import hashlib, secrets
+from fastapi import Header, HTTPException
+
+def new_key() -> tuple[str, str]:
+    key = "gw-" + secrets.token_urlsafe(32)              # high entropy, so a plain sha256 is fine
+    return key, hashlib.sha256(key.encode()).hexdigest()
+
+async def current_key(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    h = hashlib.sha256(authorization.removeprefix("Bearer ").encode()).hexdigest()
+    row = await db.fetchrow("SELECT * FROM api_keys WHERE key_hash = $1 AND active", h)
+    if not row:
+        raise HTTPException(401, "invalid key")
+    return row
+```
+
+Cache key lookups in memory for a minute so authentication doesn't hit Postgres on every call, and add a CLI to create, list and revoke keys (revocation must take effect within that minute).
+
+### 3. Rate limits and token budgets
+
+Budgets must hold even when 50 requests from one user arrive at once, so **reserve** tokens atomically before calling the model and **settle** the real number afterwards:
+
+```python title="gateway/limits.py"
+import datetime as dt
+from litellm import token_counter
+
+async def check_rpm(r, key):
+    k = f"rpm:{key['id']}:{int(dt.datetime.now().timestamp() // 60)}"
+    n = await r.incr(k)
+    await r.expire(k, 120)
+    return n <= key["rpm_limit"]
+
+def budget_key(key_id: int) -> str:
+    return f"budget:{key_id}:{dt.date.today().isoformat()}"
+
+async def reserve(r, key, model_target, messages, max_tokens) -> int | None:
+    estimate = token_counter(model=model_target, messages=messages) + max_tokens   # worst case
+    k = budget_key(key["id"])
+    used = await r.incrby(k, estimate)
+    await r.expire(k, 2 * 86400)
+    if used > key["daily_token_budget"]:
+        await r.decrby(k, estimate)                     # undo: this request doesn't fit
+        return None
+    return estimate
+
+async def settle(r, key, reserved: int, actual: int):
+    await r.incrby(budget_key(key["id"]), actual - reserved)   # usually gives tokens back
+```
+
+Reject with **429** and a `Retry-After` header (seconds until midnight for budgets, until the next minute for RPM), and require `max_tokens` on every request — an uncapped request can't be reserved safely.
+
+### 4. Routing
+
+`model="auto"` lets the gateway choose. Start with a transparent rule-based router, then measure it:
+
+```python title="gateway/router.py"
+HARD_HINTS = ("prove", "step by step", "analyse", "analyze", "compare", "design", "debug", "refactor")
+
+def route(messages: list[dict], cfg) -> str:
+    last = messages[-1]["content"] if isinstance(messages[-1]["content"], str) else ""
+    total_chars = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    complex_ = (total_chars > 6000 or len(messages) > 12
+                or any(h in last.lower() for h in HARD_HINTS) or "```" in last)
+    return cfg["routing"]["auto"]["complex" if complex_ else "simple"]
+```
+
+Build a labelled set of 100 real-looking requests ("simple" or "complex"), measure router accuracy, then run your golden set three ways — always small, always large, routed — and compare quality and cost ([choosing models](/learn/choosing-models/core/)). If the rule-based router isn't good enough, try a small classifier model and measure that too.
+
+<Example title="Worked example: what routing and caching save">
+100,000 requests a day, averaging 1,000 input and 300 output tokens. At the example prices, the large model costs $0.0075 per request and the small one $0.0025.
+
+- Always large: **$750/day**.
+- Routing 70% to the small model: 0.3 × 0.0075 + 0.7 × 0.0025 = $0.004 per request → **$400/day**.
+- Plus a 15% cache-hit rate: 0.85 × $400 = **$340/day** — about **55% less** than always using the large model.
+
+Measure your real hit rate and routing split; these numbers are only a starting point.
+</Example>
+
+### 5. Fallbacks, timeouts and a circuit breaker
+
+Try the chosen model, then its fallback chain. Skip any model whose circuit is open, retry only on errors that can succeed later, and never fall back on a bad request:
+
+```python title="gateway/call.py"
+import asyncio, time
+import litellm
+
+RETRYABLE = (litellm.RateLimitError, litellm.Timeout, litellm.APIConnectionError,
+             litellm.ServiceUnavailableError, litellm.InternalServerError)
+
+class Breaker:
+    def __init__(self, threshold=5, cooldown_s=30):
+        self.failures, self.opened_at, self.threshold, self.cooldown = 0, 0.0, threshold, cooldown_s
+    def open(self) -> bool:
+        return self.failures >= self.threshold and time.time() - self.opened_at < self.cooldown
+    def ok(self):
+        self.failures = 0
+    def fail(self):
+        self.failures += 1
+        if self.failures >= self.threshold:
+            self.opened_at = time.time()
+
+BREAKERS: dict[str, Breaker] = {}
+
+async def call_with_fallback(alias: str, cfg, **params):
+    chain = [alias] + cfg["fallbacks"].get(alias, [])
+    last_error = None
+    for name in chain:
+        br = BREAKERS.setdefault(name, Breaker())
+        if br.open():
+            continue
+        try:
+            resp = await asyncio.wait_for(
+                litellm.acompletion(model=cfg["models"][name]["target"], num_retries=0, **params),
+                timeout=cfg["timeouts"]["total_s"])
+            br.ok()
+            return name, resp                              # which model actually served it
+        except RETRYABLE + (asyncio.TimeoutError,) as e:
+            br.fail()
+            FALLBACKS.labels(alias, name).inc()
+            last_error = e
+            continue
+        except litellm.BadRequestError:
+            raise                                          # the request is wrong: don't try elsewhere
+    raise RuntimeError(f"all models failed for {alias}") from last_error
+```
+
+Retry in **one** layer only — here, the fallback chain — so a failure doesn't turn into 3 × 3 × 3 attempts ([reliability](/learn/observability/core/)).
+
+### 6. The semantic cache
+
+Return a stored answer when a new request means the same as an earlier one. Cache only what's safe to share:
+
+```python title="gateway/cache.py"
+import hashlib, json, time
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+EMB = SentenceTransformer("BAAI/bge-small-en-v1.5")
+MAX_PER_SCOPE = 5000
+
+def scope_of(key, alias, messages) -> str | None:
+    system = "".join(m["content"] for m in messages if m["role"] == "system")
+    if len([m for m in messages if m["role"] == "user"]) > 1:
+        return None                                    # multi-turn: context makes answers personal
+    sp = hashlib.sha256(system.encode()).hexdigest()[:16]
+    return f"cache:{key['team']}:{alias}:{sp}"       # never share across teams, models or prompts
+
+async def lookup(r, scope, question, threshold):
+    q = EMB.encode([question], normalize_embeddings=True)[0]      # also returned, for store() on a miss
+    rows = await r.lrange(scope, 0, MAX_PER_SCOPE - 1)
+    if not rows:
+        return None, q
+    items = [json.loads(x) for x in rows]
+    sims = np.array([it["v"] for it in items], dtype=np.float32) @ q
+    i = int(sims.argmax())
+    fresh = time.time() - items[i]["t"] < items[i]["ttl"]
+    return (items[i]["answer"] if sims[i] >= threshold and fresh else None), q
+
+async def store(r, scope, q_vec, answer, ttl):
+    await r.lpush(scope, json.dumps({"v": q_vec.tolist(), "answer": answer, "t": time.time(), "ttl": ttl}))
+    await r.ltrim(scope, 0, MAX_PER_SCOPE - 1)        # keep the newest entries
+```
+
+Rules: cache only **temperature 0**, single-turn requests; skip requests that contain tool calls or personal data; let apps opt out with a header; run `EMB.encode` in a thread pool so it doesn't block the event loop. Build a test set of 100 question pairs that **look similar but need different answers** ("cancel my order" vs "cancel my subscription") and tune the threshold until false hits are under 1%. At larger scale, move the vectors into a Redis vector index ([semantic caching](/learn/advanced-rag/deep-dive/)).
+
+### 7. The OpenAI-compatible endpoint, with streaming
+
+```python title="gateway/main.py"
+import json, time
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="AI Gateway")
+
+class ChatRequest(BaseModel):
+    model: str = "auto"
+    messages: list[dict] = Field(min_length=1, max_length=200)
+    max_tokens: int = Field(gt=0, le=8000)                # required, so budgets can be reserved
+    temperature: float = Field(default=0, ge=0, le=2)
+    stream: bool = False
+
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest, key=Depends(current_key)):
+    t0 = time.perf_counter()
+    if not await check_rpm(r, key):
+        raise HTTPException(429, "rate limit", headers={"Retry-After": "60"})
+    alias = route(req.messages, CFG) if req.model == "auto" else req.model
+    if req.model not in key["allowed_models"] or alias not in CFG["models"]:
+        raise HTTPException(403, f"model {req.model} not allowed for this key")
+
+    scope = scope_of(key, alias, req.messages) if req.temperature == 0 and not req.stream else None
+    if scope:
+        hit, q_vec = await lookup(r, scope, req.messages[-1]["content"], CFG["cache"]["threshold"])
+        if hit:
+            record(key, alias, "cache", 0, 0, 0.0, t0, cache_hit=True)
+            return JSONResponse(openai_response(hit, model=alias, cached=True))
+
+    reserved = await reserve(r, key, CFG["models"][alias]["target"], req.messages, req.max_tokens)
+    if reserved is None:
+        raise HTTPException(429, "daily token budget used up", headers={"Retry-After": str(secs_to_midnight())})
+
+    params = dict(messages=req.messages, max_tokens=req.max_tokens, temperature=req.temperature)
+    if req.stream:
+        return StreamingResponse(stream_tokens(key, alias, params, reserved, t0), media_type="text/event-stream")
+
+    try:
+        served_by, resp = await call_with_fallback(alias, CFG, **params)
+    except Exception:
+        await settle(r, key, reserved, 0)
+        raise HTTPException(503, "no model available, please retry")
+    u = resp.usage
+    await settle(r, key, reserved, u.prompt_tokens + u.completion_tokens)
+    cost = price(served_by, u.prompt_tokens, u.completion_tokens)
+    record(key, alias, served_by, u.prompt_tokens, u.completion_tokens, cost, t0)
+    if scope:
+        await store(r, scope, q_vec, resp.choices[0].message.content, CFG["cache"]["ttl_seconds"])
+    return JSONResponse(resp.model_dump())
+```
+
+`stream_tokens` calls `call_with_fallback(..., stream=True, stream_options={"include_usage": True})`, forwards each chunk as an SSE `data:` line, records time to first token, and settles the budget from the final usage chunk. Fall back only **before** the first token is sent — once a user has seen half an answer, switching models would produce a mismatched reply, so return an error event instead.
+
+Apps now use the standard SDK unchanged:
+
+```python title="client.py"
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="gw-...")      # a gateway key
+r = client.chat.completions.create(model="auto", max_tokens=300,
+                                   messages=[{"role": "user", "content": "Summarise our leave policy in 3 bullets"}])
+```
+
+### 8. Metrics and the dashboard
+
+```python title="gateway/metrics.py"
+from prometheus_client import Counter, Histogram
+
+LATENCY = Histogram("gw_request_seconds", "End-to-end latency", ["alias", "served_by"],
+                    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32))
+TTFT = Histogram("gw_ttft_seconds", "Time to first token (streaming)", ["served_by"],
+                 buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8))
+TOKENS = Counter("gw_tokens_total", "Tokens", ["served_by", "direction"])
+COST = Counter("gw_cost_usd_total", "Spend in USD", ["team", "served_by"])
+REQUESTS = Counter("gw_requests_total", "Requests", ["team", "alias", "status"])
+CACHE = Counter("gw_cache_total", "Cache lookups", ["result"])          # hit / miss / skipped
+FALLBACKS = Counter("gw_fallbacks_total", "Fallback attempts", ["alias", "failed_model"])
+BUDGET_REJECTS = Counter("gw_budget_rejections_total", "Requests refused by budget", ["team"])
+```
+
+Label by **team and model only** — never by user or key, which would create a time series per user ([cardinality](/learn/observability/deep-dive/)). Per-user detail goes in the `usage_log` table. Grafana panels:
+
+| Panel | PromQL |
+|---|---|
+| p95 latency by model | `histogram_quantile(0.95, sum(rate(gw_request_seconds_bucket[5m])) by (le, served_by))` |
+| p95 time to first token | `histogram_quantile(0.95, sum(rate(gw_ttft_seconds_bucket[5m])) by (le, served_by))` |
+| Spend per hour by team | `sum(increase(gw_cost_usd_total[1h])) by (team)` |
+| Cache hit rate | `sum(rate(gw_cache_total{result="hit"}[1h])) / sum(rate(gw_cache_total{result!="skipped"}[1h]))` |
+| Fallback rate | `sum(rate(gw_fallbacks_total[5m])) / sum(rate(gw_requests_total[5m]))` |
+| Error rate | `sum(rate(gw_requests_total{status=~"5.."}[5m])) / sum(rate(gw_requests_total[5m]))` |
+| Routing split | `sum(rate(gw_tokens_total{direction="output"}[1h])) by (served_by)` |
+
+Add alerts for spend spikes, error rate and fallback rate, and commit the dashboard JSON to the repo.
+
+### 9. Test it under load and under failure
+
+- **Mock provider:** a tiny FastAPI app that imitates the provider API with configurable latency and error rates, so load tests are free and repeatable (point LiteLLM at it with `api_base`).
+- **Load test** with k6: 200 concurrent users, half streaming. Check p95 gateway overhead and that no budget is exceeded.
+- **Chaos test:** make the primary provider return 503s for two minutes. Every request should still succeed through the fallback, the breaker should open, and the dashboard should show it.
+- **Budget race test:** fire 50 parallel requests from one key whose budget fits only 10; exactly 10 succeed.
+
+```javascript title="load/k6.js"
+import http from "k6/http";
+import { check } from "k6";
+
+export const options = { vus: 200, duration: "3m" };
+
+export default function () {
+  const res = http.post("http://gateway:8080/v1/chat/completions",
+    JSON.stringify({ model: "auto", max_tokens: 200,
+                     messages: [{ role: "user", content: `Question ${__ITER % 50}: what is our refund policy?` }] }),
+    { headers: { "Content-Type": "application/json", Authorization: `Bearer ${__ENV.GW_KEY}` } });
+  check(res, { "2xx or 429": (r) => (r.status >= 200 && r.status < 300) || r.status === 429 });
+}
+```
+
+## Evaluation plan
+
+- **Routing:** router accuracy on 100 labelled requests; quality and cost on your golden set for always-small, always-large and routed.
+- **Cache:** hit rate on realistic traffic; false-hit rate on 100 tricky pairs (must be ≤ 1%).
+- **Reliability:** chaos-test success rate; time for the breaker to open and close.
+- **Limits:** the budget race test; RPM limits under load.
+- **Overhead:** gateway p95 overhead with a zero-latency mock provider.
+
+Put the results in `EVAL.md` with the configuration that produced them.
+
+## Security checklist
+
+- [ ] Provider API keys only in the gateway, from a secret manager; rotated on a schedule.
+- [ ] Gateway keys stored as hashes, shown once, revocable; per-key model allow-lists.
+- [ ] No prompt or answer text in logs or metrics by default; `usage_log` holds counts only.
+- [ ] Cache scoped by team, model and system prompt; never caches multi-turn, tool or personal-data requests.
+- [ ] `max_tokens` required and capped; request size and message count limited.
+- [ ] TLS in front; the admin CLI and metrics endpoint not exposed publicly.
+- [ ] Fallback models approved for the same data class (don't fall back from an in-region model to one that sends data abroad).
+
+## Deploy it
+
+Run the gateway on a container platform with at least two replicas behind a layer-7 load balancer configured for streaming (buffering off, long idle timeouts — see [load balancing](/learn/deployment-cicd/deep-dive/)). Redis and Postgres as managed services. Ship it with the same CI eval gate, health checks and rollback steps as [Project 04's "Ship it" step](/projects/policy-rag/).
+
+## Stretch goals
+
+- **Feature-flagged model rollouts:** send 5% of `large` traffic to a new model version and compare quality and cost ([feature flags](/learn/deployment-cicd/core/)).
+- **Guardrails at the gateway:** personal-data redaction and an injection classifier applied to every app at once.
+- **Prefix-aware routing** to self-hosted vLLM replicas for cache reuse.
+- **Batch endpoint** that queues offline jobs for the provider's batch API at a lower price.
+- Expose the gateway as the single model endpoint for your other projects, and show their combined cost dashboard.
+
+## Show it off
+
+README: the architecture diagram, the order of checks and why, the routing experiment table (quality vs cost), the cache false-hit tuning, the chaos-test recording, and the Grafana dashboard screenshot.
+
+**Interview talking points:** why budgets need reserve-then-settle; where retries belong; why the cache is scoped the way it is; how you chose the routing rule and proved it didn't hurt quality; what changes when you add a second region.

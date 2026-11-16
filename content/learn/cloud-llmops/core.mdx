@@ -233,7 +233,7 @@ docker run -p 4000:4000 -v $(pwd)/litellm_config.yaml:/app/config.yaml \
 # Apps call http://gateway:4000/v1/chat/completions with model="chat-default" and a per-team virtual key
 ```
 
-Gateway features to use: **virtual keys** per team or app, budgets and rate limits, spend tracking, fallbacks on provider errors, caching, logging callbacks into your observability stack, and a single place to swap models ([load balancing across providers](/learn/deployment-cicd/deep-dive/)).
+Gateway features to use: **virtual keys** per team or app, budgets and rate limits, spend tracking, fallbacks on provider errors, caching, logging callbacks into your observability stack, and a single place to swap models ([load balancing across providers](/learn/deployment-cicd/deep-dive/)). To understand what a gateway does inside, build one yourself in [Project 11](/projects/ai-gateway/).
 
 ## LLMOps practices
 
