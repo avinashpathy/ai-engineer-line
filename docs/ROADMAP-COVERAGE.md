@@ -2,13 +2,13 @@
 
 This file checks the site against every topic in the *AI Engineer Roadmap* (Learnvora, November 2026 edition): 8 areas × 20 topics. Topic names are used only as a checklist; all explanations on the site are original or adapted from the author's own notes.
 
-**Status:** 135 published · 20 planned (in the notes; arrives when that station is written) · 5 gaps (not in the notes; must be written new)
+**Status:** 147 published · 11 planned (in the notes; arrives when that station is written) · 2 gaps (not in the notes; must be written new)
 
 | Area | ✅ Published | 🕒 Planned | ⚠️ Gap |
 |---|---|---|---|
 | LLM | 20 | 0 | 0 |
 | RAG | 20 | 0 | 0 |
-| AI Agents | 8 | 9 | 3 |
+| AI Agents | 20 | 0 | 0 |
 | Evals | 20 | 0 | 0 |
 | AI System Design | 20 | 0 | 0 |
 | AI Security | 20 | 0 | 0 |
@@ -71,26 +71,26 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 
 | # | Topic | Status | Where |
 |---|---|---|---|
-| 01 | Tool calling | ✅ | [llm-apis/core](/learn/llm-apis/core/) |
-| 02 | The agent loop | ✅ | [llm-apis/core](/learn/llm-apis/core/); more in Agent Foundations |
-| 03 | ReAct pattern | 🕒 | Agent Foundations station |
-| 04 | Planning | 🕒 | Agent Patterns station · used in Project 09 |
-| 05 | Reflection | ✅ | [prompt-engineering/core](/learn/prompt-engineering/core/) (self-critique); more in Agent Patterns |
+| 01 | Tool calling | ✅ | [llm-apis/core](/learn/llm-apis/core/), [agent-foundations/core](/learn/agent-foundations/core/) |
+| 02 | The agent loop | ✅ | [agent-foundations/core](/learn/agent-foundations/core/), [agent-foundations/deep-dive](/learn/agent-foundations/deep-dive/) |
+| 03 | ReAct pattern | ✅ | [agent-foundations/core](/learn/agent-foundations/core/), [agent-foundations/deep-dive](/learn/agent-foundations/deep-dive/) |
+| 04 | Planning | ✅ | [agent-patterns/core](/learn/agent-patterns/core/), [agent-foundations/core](/learn/agent-foundations/core/) |
+| 05 | Reflection | ✅ | [agent-patterns/core](/learn/agent-patterns/core/) (evaluator–optimiser) |
 | 06 | Short-term memory | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
 | 07 | Long-term memory | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
-| 08 | MCP servers | 🕒 | MCP station · built in Project 08 |
-| 09 | MCP clients | 🕒 | MCP station · used in Project 08 |
-| 10 | Agent Skills | ⚠️ | Not in the notes yet — to be written for the MCP station |
-| 11 | Multi-agent handoffs | 🕒 | Agent Foundations deep dive |
-| 12 | Orchestrator-worker pattern | 🕒 | Agent Patterns station · used in Project 09 |
-| 13 | LangGraph | 🕒 | LangGraph station · used in Projects 07, 09 |
-| 14 | OpenAI Agents SDK | ⚠️ | Only name-checked in the notes — to be written for Agent Foundations |
-| 15 | State and checkpoints | 🕒 | LangGraph station · used in Project 09 |
-| 16 | Human in the loop | 🕒 | Agent Patterns station · used in Projects 05, 07, 09 |
+| 08 | MCP servers | ✅ | [mcp/core](/learn/mcp/core/) · built in Project 08 |
+| 09 | MCP clients | ✅ | [mcp/core](/learn/mcp/core/), [agent-foundations/deep-dive](/learn/agent-foundations/deep-dive/) |
+| 10 | Agent Skills | ✅ | [mcp/core](/learn/mcp/core/) |
+| 11 | Multi-agent handoffs | ✅ | [agent-foundations/core](/learn/agent-foundations/core/), [langgraph/core](/learn/langgraph/core/) |
+| 12 | Orchestrator-worker pattern | ✅ | [agent-patterns/core](/learn/agent-patterns/core/), [agent-foundations/deep-dive](/learn/agent-foundations/deep-dive/) |
+| 13 | LangGraph | ✅ | [langgraph/core](/learn/langgraph/core/) |
+| 14 | OpenAI Agents SDK | ✅ | [agent-foundations/core](/learn/agent-foundations/core/) |
+| 15 | State and checkpoints | ✅ | [langgraph/core](/learn/langgraph/core/) |
+| 16 | Human in the loop | ✅ | [agent-patterns/core](/learn/agent-patterns/core/), [langgraph/core](/learn/langgraph/core/) |
 | 17 | Context engineering | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
 | 18 | Context compaction | ✅ | [context-engineering/core](/learn/context-engineering/core/) |
-| 19 | Stop conditions | ✅ | [llm-apis/core](/learn/llm-apis/core/) (round limits); more in Agent Patterns |
-| 20 | A2A protocol | ⚠️ | Not in the notes yet — to be written for the Agent Foundations deep dive |
+| 19 | Stop conditions | ✅ | [agent-foundations/core](/learn/agent-foundations/core/), [agent-patterns/core](/learn/agent-patterns/core/) |
+| 20 | A2A protocol | ✅ | [agent-foundations/deep-dive](/learn/agent-foundations/deep-dive/) |
 
 ## Evals
 
@@ -155,7 +155,7 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 07 | PII redaction | ✅ | [alignment-safety/core](/learn/alignment-safety/core/), [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 08 | Data leakage | ✅ | [alignment-safety/core](/learn/alignment-safety/core/) |
 | 09 | Least-privilege tools | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/), [python-backend/sql-git](/learn/python-backend/sql-git/) |
-| 10 | Tool sandboxing | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
+| 10 | Tool sandboxing | ✅ | [computer-use-agents/core](/learn/computer-use-agents/core/), [agent-patterns/core](/learn/agent-patterns/core/) |
 | 11 | Secrets management | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/), [start-here/setup](/learn/start-here/setup/) |
 | 12 | API key rotation | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/), [llm-apis/core](/learn/llm-apis/core/) |
 | 13 | Authorization for agents | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/), [python-backend/production-backend](/learn/python-backend/production-backend/) |
@@ -163,7 +163,7 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 15 | Content moderation | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 16 | Data poisoning | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 17 | Access control in RAG | ✅ | [production-rag/core](/learn/production-rag/core/), [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
-| 18 | MCP server trust | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/); more in the MCP station |
+| 18 | MCP server trust | ✅ | [mcp/core](/learn/mcp/core/), [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 19 | Audit logging | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 | 20 | Red teaming | ✅ | [alignment-safety/deep-dive](/learn/alignment-safety/deep-dive/) |
 

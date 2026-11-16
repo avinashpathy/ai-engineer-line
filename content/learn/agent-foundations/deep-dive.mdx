@@ -1,0 +1,363 @@
+---
+summary: "A framework-free ReAct agent you can read in one sitting, a LangGraph supervisor with specialist agents, the same team in CrewAI, long-term memory with erasure, calling MCP servers from code, the A2A protocol for agents talking to other agents (agent cards, tasks, messages, streaming, security), comparing agent designs by latency, cost and reliability, and evaluating agents on outcomes, trajectories and consistency (pass^k)."
+---
+
+## An agent in plain Python
+
+<Level l="advanced" />
+
+An agent is a loop. Here is a framework-free ReAct agent you can read in one sitting — it uses a JSON protocol in the prompt, so it works with any model:
+
+```python title="react_agent.py"
+import json
+
+TOOLS = {}
+
+def tool(fn):
+    """Register a function as a tool; its docstring becomes the description."""
+    TOOLS[fn.__name__] = fn
+    return fn
+
+@tool
+def search_kb(query: str) -> str:
+    """Search the internal knowledge base. Returns top passages."""
+    return "\n".join(d["text"] for d in retrieve(query))
+
+@tool
+def calculator(expression: str) -> str:
+    """Evaluate arithmetic like '1200*0.18'."""
+    return str(safe_eval(expression))
+
+SYSTEM = f"""You solve tasks step by step using tools.
+Available tools: {json.dumps({n: f.__doc__ for n, f in TOOLS.items()})}
+At each step reply with JSON only, one of:
+{{"thought": "...", "action": "<tool name>", "input": {{...}}}}
+{{"thought": "...", "final_answer": "..."}}"""
+
+def run_agent(task, llm, max_steps=8):
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
+    for _ in range(max_steps):
+        reply = llm(messages)
+        messages.append({"role": "assistant", "content": reply})
+        try:
+            msg = json.loads(reply)
+        except json.JSONDecodeError:
+            messages.append({"role": "user", "content": "Invalid JSON. Reply with the required JSON only."})
+            continue
+        if "final_answer" in msg:
+            return msg["final_answer"], messages
+        name, args = msg.get("action"), msg.get("input", {})
+        if name not in TOOLS:
+            obs = f"ERROR: unknown tool {name}. Choose from {list(TOOLS)}"
+        else:
+            try:
+                obs = TOOLS[name](**args)[:3000]            # truncate long observations
+            except Exception as e:
+                obs = f"ERROR: {e}"                         # errors go back to the model, not up the stack
+        messages.append({"role": "user", "content": f"Observation: {obs}"})
+    return "Stopped: step budget exhausted.", messages
+```
+
+Every agent framework adds conveniences — native tool-calling APIs, state persistence, streaming, tracing, interrupts — on top of exactly this loop.
+
+## A multi-agent supervisor in LangGraph
+
+<Level l="advanced" />
+
+A supervisor routes work to specialist agents and decides when the task is done.
+
+```mermaid caption="The supervisor pattern: every specialist reports back to the supervisor, which picks the next one or finishes."
+flowchart TD
+  U[User request] --> S{Supervisor}
+  S -- research --> R[Researcher<br/>web · knowledge base]
+  S -- numbers --> A[Analyst<br/>SQL · calculator]
+  S -- write up --> W[Writer]
+  R --> S
+  A --> S
+  W --> S
+  S -- FINISH --> OUT[Answer]
+```
+
+```python title="supervisor.py"
+from typing import Annotated, Literal, TypedDict
+
+from langchain.agents import create_agent
+from langchain_anthropic import ChatAnthropic
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel
+
+llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)
+researcher = create_agent(llm, tools=[web_search, search_kb],
+                          system_prompt="You research facts. Return findings with sources.")
+analyst = create_agent(llm, tools=[run_sql, calculator],
+                       system_prompt="You analyse data with SQL and arithmetic. Show numbers.")
+writer = create_agent(llm, tools=[], system_prompt="You write clear, concise business summaries.")
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+    next: str
+
+class Route(BaseModel):
+    next: Literal["researcher", "analyst", "writer", "FINISH"]
+    reason: str
+
+def supervisor(state: State):
+    decision = llm.with_structured_output(Route).invoke(
+        [("system", "You manage a team: researcher (documents/web), analyst (SQL/maths), "
+                    "writer (final report). Pick who acts next, or FINISH when the request is fully answered.")]
+        + state["messages"])
+    return {"next": decision.next}
+
+def make_node(agent, name):
+    def node(state: State):
+        result = agent.invoke({"messages": state["messages"]})
+        return {"messages": [("assistant", f"[{name}] " + result["messages"][-1].content)]}
+    return node
+
+g = StateGraph(State)
+g.add_node("supervisor", supervisor)
+for name, agent in [("researcher", researcher), ("analyst", analyst), ("writer", writer)]:
+    g.add_node(name, make_node(agent, name))
+    g.add_edge(name, "supervisor")
+g.add_edge(START, "supervisor")
+g.add_conditional_edges("supervisor", lambda s: s["next"],
+                        {"researcher": "researcher", "analyst": "analyst", "writer": "writer", "FINISH": END})
+team = g.compile()
+
+out = team.invoke({"messages": [("user", "Why did Q3 revenue in the South region drop, "
+                                         "and what does our pricing policy say?")]},
+                  {"recursion_limit": 20})
+```
+
+<Tip>
+**Keep shared state structured.** Passing only a growing message list between agents causes context bloat and confusion. Store structured fields in state (findings, SQL results, the draft) and give each agent only what it needs.
+</Tip>
+
+### The same team in CrewAI
+
+```python title="crew.py"
+from crewai import Agent, Crew, Process, Task
+
+researcher = Agent(role="Market Researcher", goal="Find reliable facts about {topic}",
+                   backstory="Meticulous analyst who cites sources.", tools=[search_tool],
+                   llm="anthropic/claude-sonnet-4-5")
+writer = Agent(role="Business Writer", goal="Write a crisp one-page brief",
+               backstory="Ex-consultant.", llm="anthropic/claude-sonnet-4-5")
+
+t1 = Task(description="Research {topic}: key players, trends, numbers.",
+          expected_output="Bullet findings with sources", agent=researcher)
+t2 = Task(description="Write a one-page brief from the findings.",
+          expected_output="Markdown brief", agent=writer, context=[t1])
+
+crew = Crew(agents=[researcher, writer], tasks=[t1, t2], process=Process.sequential)
+print(crew.kickoff(inputs={"topic": "HR tech adoption in Indian mid-size companies"}))
+```
+
+CrewAI is quick for role-based prototypes. LangGraph gives finer control of state, branching, persistence and human-in-the-loop, and is usually preferred for production.
+
+## Long-term memory
+
+<Level l="advanced" />
+
+```python title="memory.py"
+import time, uuid
+
+class LongTermMemory:
+    """Stores facts per user with embeddings; retrieves relevant ones at the start of a task."""
+
+    def __init__(self, embedder):
+        self.emb, self.items = embedder, []
+
+    def remember(self, user_id, fact, kind="preference"):
+        self.items.append({"id": uuid.uuid4().hex, "user": user_id, "fact": fact, "kind": kind,
+                           "vec": self.emb.encode([fact], normalize_embeddings=True)[0], "ts": time.time()})
+
+    def recall(self, user_id, query, k=5, min_sim=0.35):
+        q = self.emb.encode([query], normalize_embeddings=True)[0]
+        mine = [m for m in self.items if m["user"] == user_id]          # never cross users
+        scored = sorted(((float(m["vec"] @ q), m) for m in mine), key=lambda x: -x[0])
+        return [m["fact"] for s, m in scored[:k] if s >= min_sim]
+
+    def forget(self, user_id):                                          # erasure requests
+        self.items = [m for m in self.items if m["user"] != user_id]
+```
+
+Design questions for memory:
+
+- What is worth remembering — explicit user statements, or things the agent inferred?
+- Who can see it, and how long is it kept?
+- How can users view, correct and delete it?
+- How do you avoid storing sensitive data?
+
+Summarising long conversations into compact notes (**compaction**) keeps context windows manageable for long-running agents.
+
+## Calling MCP servers from code
+
+<Level l="advanced" />
+
+MCP servers expose **tools** (functions), **resources** (readable data such as files or records) and **prompts** (templates). A client connects, lists the capabilities and calls them.
+
+```python title="mcp_client.py"
+import asyncio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+async def main():
+    params = StdioServerParameters(command="python", args=["hr_server.py"])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            print([t.name for t in tools.tools])                  # ['leave_balance']
+            result = await session.call_tool("leave_balance", {"employee_id": "E1001"})
+            print(result.content[0].text)
+
+asyncio.run(main())
+```
+
+Remote MCP servers run over HTTP with OAuth. Only connect servers you trust, and remember that tool descriptions and outputs are **untrusted input**. The [MCP station](/learn/mcp/core/) goes much deeper.
+
+## A2A: agents talking to other agents
+
+<Level l="advanced" />
+
+MCP connects an agent to **tools**. The **Agent2Agent (A2A) protocol** connects an agent to **other agents** — often built by other teams or companies, on other frameworks, which you can't see inside. Google introduced it in 2025 and it's now an open project under the Linux Foundation.
+
+| | MCP | A2A |
+|---|---|---|
+| Connects | An AI app ↔ tools and data | An agent ↔ another agent |
+| The other side is | A function with a schema | An opaque agent that reasons, may take minutes, and may ask questions back |
+| Unit of work | A tool call | A **task** with a lifecycle |
+| Example | "Call `leave_balance(E1001)`" | "Travel agent, book a Delhi trip for this employee within policy" |
+
+They're complementary: an agent might use MCP for its own tools and A2A to delegate to a partner's agent.
+
+### The core ideas
+
+- **Agent card:** a JSON document the remote agent publishes (conventionally at `/.well-known/agent-card.json`) describing its name, what it can do (its **skills**), its endpoint URL, whether it supports streaming or push notifications, and which authentication it requires. Clients read it to discover and choose agents.
+- **Task:** the unit of work, with an ID and a state — `submitted`, `working`, `input-required` (the remote agent needs more information), `completed`, `failed`, `canceled` and others.
+- **Message:** one turn from the client or the agent, made of **parts** — text, files, or structured data.
+- **Artifact:** an output the task produced (a report, a booking confirmation, a file).
+- **Transport:** JSON-RPC 2.0 over HTTPS, with Server-Sent Events for streaming updates and webhooks (push notifications) for long-running tasks.
+
+```mermaid caption="An A2A exchange: discover the agent, send a task, handle a request for more input, and receive the result as an artifact."
+sequenceDiagram
+  participant C as Your agent (client)
+  participant R as Remote travel agent
+  C->>R: GET /.well-known/agent-card.json
+  R-->>C: Agent card: skills, endpoint, auth
+  C->>R: message/send "Book Delhi trip, 3–5 Dec, within policy"
+  R-->>C: Task working
+  R-->>C: Task input-required "Which cost centre?"
+  C->>R: message/send "CC-204" (same task)
+  R-->>C: Task completed + artifact (itinerary)
+```
+
+### Calling an A2A agent
+
+Official SDKs exist for several languages, but the protocol is plain JSON-RPC, so you can see exactly what goes over the wire:
+
+```python title="a2a_client.py"
+# The A2A spec is evolving: check a2a-protocol.org for current method and field names.
+import uuid
+import httpx
+
+BASE = "https://travel-agent.partner.example"
+token = get_oauth_token(scope="travel.book")                  # from the card's security scheme
+
+card = httpx.get(f"{BASE}/.well-known/agent-card.json", timeout=10).json()
+print(card["name"], [s["name"] for s in card.get("skills", [])])
+
+def send(text, task_id=None, context_id=None):
+    message = {"role": "user", "messageId": uuid.uuid4().hex,
+               "parts": [{"kind": "text", "text": text}]}
+    if task_id:
+        message.update(taskId=task_id, contextId=context_id)  # continue the same task
+    rpc = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "message/send",
+           "params": {"message": message}}
+    r = httpx.post(card["url"], json=rpc, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    r.raise_for_status()
+    return r.json()["result"]
+
+task = send("Book a Delhi trip for employee E1001, 3-5 December, within travel policy.")
+if task["status"]["state"] == "input-required":
+    task = send("Cost centre CC-204", task_id=task["id"], context_id=task["contextId"])
+print(task["status"]["state"], [a.get("name") for a in task.get("artifacts", [])])
+```
+
+### A2A security
+
+- **Authenticate both ways.** Use the scheme the agent card declares (OAuth 2.0, API keys, mutual TLS); fetch cards only over HTTPS from domains you trust.
+- **Treat everything that comes back as untrusted** — messages and artifacts can carry prompt injections, just like web pages or tool outputs.
+- **Delegate least privilege.** Give the remote agent a token scoped to the task (book travel), not your agent's full permissions, and never forward the user's own credentials.
+- **Keep humans in charge of consequences.** If the remote agent's task spends money or changes records, require approval before you accept it.
+- **Log every task** (who, what, which agent, outcome) for audit.
+
+## Comparing agent designs
+
+<Level l="advanced" />
+
+| Pattern | Latency | Cost | Reliability | Best for |
+|---|---|---|---|---|
+| Single LLM call | Lowest | Lowest | Highest | Classification, extraction, drafting |
+| Prompt chain (workflow) | Low | Low | High | Fixed multi-step processes |
+| Router + specialists | Low | Low | High | Triage across task types |
+| Single ReAct agent | Medium | Medium | Medium | Open-ended tool use, up to about 10 steps |
+| Plan-and-execute | Medium | Medium | Medium–high | Long tasks; cheaper executor |
+| Supervisor multi-agent | High | High | Medium | Tasks needing different tools or permissions |
+| Autonomous long-running agent | Very high | Very high | Needs strong guardrails | Research, coding, operations with checkpoints |
+
+## Evaluating agents
+
+<Level l="advanced" />
+
+Agents need evaluation of the **outcome** and of the **trajectory** (the path they took).
+
+| Level | Metric | Example check |
+|---|---|---|
+| Outcome | Task success rate | The final database state is correct; the answer matches the reference |
+| Trajectory | Tool-selection accuracy | Called `get_schema` before `run_sql` |
+| Trajectory | Argument validity | The SQL parses; the IDs exist |
+| Efficiency | Steps, tokens, cost, latency per task | Median 4 steps, ₹2 per task |
+| Robustness | Success under perturbations | Paraphrased tasks; tool errors injected |
+| Safety | Policy violations | No unapproved writes; ignores injected instructions |
+| Consistency | **pass^k** — succeeds in all k repeated runs | Reliability matters more than the best case |
+
+```python title="evaluate_agent.py"
+def evaluate_agent(cases, run, k=3):
+    results = []
+    for c in cases:
+        runs = [run(c["task"]) for _ in range(k)]           # agents are stochastic: repeat
+        ok = [c["check"](r) for r in runs]                   # an outcome checker per case
+        tools_ok = [all(t in r["tools_used"] for t in c.get("required_tools", [])) for r in runs]
+        results.append({"id": c["id"], "pass@1": ok[0], "pass^k": all(ok),
+                        "tools_ok": sum(tools_ok) / k, "avg_steps": sum(r["steps"] for r in runs) / k})
+    return results
+```
+
+<Example title="Worked example: pass@1 vs pass^k">
+An agent succeeds 85% of the time on each independent attempt, so **pass@1 = 0.85**.
+
+The chance that all three of three runs succeed is 0.85³ = **0.61**. For a workflow people run every day, consistent success is what they experience — design for reliability, not lucky runs.
+</Example>
+
+Public benchmarks — SWE-bench (coding), τ-bench (tool-using customer service), WebArena (browsing), GAIA (general assistants) — help compare models. For your own system, build domain task suites with **checkable end states**, such as a sandbox database whose rows you verify after each task. Tool-call and trajectory scoring in code is in the [evaluation deep dive](/learn/evaluation/deep-dive/).
+
+<Interview>
+<QA q="When would you use A2A rather than MCP?">
+MCP when the other side is a tool or data source with a clear schema. A2A when it's another agent — often owned by another team or company — that reasons on its own, may run for a long time or ask follow-up questions, and that you can't see inside.
+</QA>
+<QA q="How do you keep a multi-agent system from getting confused?">
+Keep shared state structured rather than one long message list, give each agent only the context and tools it needs, cap total steps, and trace every handoff so you can see where context was lost.
+</QA>
+<QA q="Why report pass^k and not just pass@1?">
+Agents are stochastic. pass@1 shows how often a single run works; pass^k shows how often it works every time, which is what users of a daily workflow actually experience.
+</QA>
+</Interview>
+
+<Takeaways>
+- Every agent is a think → act → observe loop; frameworks add state, tools, persistence and tracing.
+- Supervisors coordinate specialists; keep shared state structured; prefer the simplest pattern that works.
+- MCP connects agents to tools; A2A connects agents to other agents through agent cards and tasks. Evaluate outcomes, trajectories, efficiency, safety and consistency (pass^k).
+</Takeaways>
