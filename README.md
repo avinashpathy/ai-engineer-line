@@ -2,7 +2,7 @@
 
 A free, structured website for people who want to become AI Engineers, laid out like a metro map: six lines (Foundations, LLM Engineering, RAG, Agents, Production, Career), 32 stations, beginner-to-advanced lessons with diagrams, three starter projects with complete code, eleven production-ready projects, a 26-week roadmap and a glossary.
 
-Anyone can read everything. Signing in (GitHub, Google or email link) saves lesson progress across devices.
+Anyone can read everything. Signing in (a one-time email link, plus GitHub or Google if you switch them on) saves lesson progress across devices.
 
 ## Tech
 

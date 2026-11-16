@@ -7,6 +7,15 @@ import { useProgress } from "./ProgressProvider";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+// GitHub / Google buttons appear only for providers switched on in NEXT_PUBLIC_AUTH_PROVIDERS
+// (comma-separated, e.g. "github,google"), and only after they're set up in Supabase (DEPLOY.md, step 2).
+// With the variable empty, the page offers the email link alone, which needs no extra setup.
+type Provider = "github" | "google";
+const PROVIDER_NAMES: Record<Provider, string> = { github: "GitHub", google: "Google" };
+const PROVIDERS = (process.env.NEXT_PUBLIC_AUTH_PROVIDERS ?? "")
+  .split(",").map(s => s.trim().toLowerCase())
+  .filter((s): s is Provider => s === "github" || s === "google");
+
 function callbackUrl() { return `${window.location.origin}/auth/callback/`; }
 
 export function AccountPanel() {
@@ -38,10 +47,10 @@ export function AccountPanel() {
     );
   }
 
-  const oauth = async (provider: "github" | "google") => {
+  const oauth = async (provider: Provider) => {
     setBusy(true); setMsg(null);
     const { error } = await supabase()!.auth.signInWithOAuth({ provider, options: { redirectTo: callbackUrl() } });
-    if (error) { setBusy(false); setMsg({ ok: false, text: `Couldn't start ${provider === "github" ? "GitHub" : "Google"} sign-in. Try again, or use email.` }); }
+    if (error) { setBusy(false); setMsg({ ok: false, text: `Couldn't start ${PROVIDER_NAMES[provider]} sign-in. Try again, or use email.` }); }
   };
   const magic = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,19 +60,27 @@ export function AccountPanel() {
     const { error } = await supabase()!.auth.signInWithOtp({ email: v, options: { emailRedirectTo: callbackUrl(), shouldCreateUser: true } });
     setBusy(false);
     setMsg(error
-      ? { ok: false, text: error.status === 429 ? "Too many attempts. Wait a minute and try again." : "Couldn't send the sign-in link. Check the address and try again." }
+      ? { ok: false, text: error.status === 429 ? "Too many sign-in emails were sent recently. Wait a few minutes and try again."
+          : (error.code === "email_address_not_authorized" || /not authorized/i.test(error.message))
+            ? "Sign-in emails can't be sent to this address yet — the site's email service isn't fully set up. Your progress is still saved on this device."
+            : "Couldn't send the sign-in link. Check the address and try again." }
       : { ok: true, text: `Check ${v} for a sign-in link. It expires in one hour.` });
   };
 
   return (
     <div className="auth-box panel">
       <h2>Sign in</h2>
-      <p style={{ color: "var(--muted)" }}>No passwords to remember or leak. Use GitHub, Google, or a one-time link sent to your email.</p>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
-        <button className="btn dark" type="button" disabled={busy} onClick={() => oauth("github")}>Continue with GitHub</button>
-        <button className="btn ghost" type="button" disabled={busy} onClick={() => oauth("google")}>Continue with Google</button>
-      </div>
-      <div className="or mono">or</div>
+      <p style={{ color: "var(--muted)" }}>No passwords to remember or leak. {PROVIDERS.length > 0
+        ? <>Use {PROVIDERS.map(p => PROVIDER_NAMES[p]).join(" or ")}, or a one-time link sent to your email.</>
+        : <>We&apos;ll email you a one-time sign-in link.</>}</p>
+      {PROVIDERS.length > 0 && <>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+          {PROVIDERS.map((p, i) => (
+            <button key={p} className={`btn ${i === 0 ? "dark" : "ghost"}`} type="button" disabled={busy} onClick={() => oauth(p)}>Continue with {PROVIDER_NAMES[p]}</button>
+          ))}
+        </div>
+        <div className="or mono">or</div>
+      </>}
       <form onSubmit={magic} noValidate>
         <label htmlFor="email">Email address</label>
         <input id="email" className="input" type="email" autoComplete="email" inputMode="email" value={email} onChange={e => setEmail(e.target.value)} maxLength={254} required style={{ maxWidth: "none" }} />

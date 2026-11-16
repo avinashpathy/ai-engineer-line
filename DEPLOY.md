@@ -12,7 +12,7 @@ You need three free accounts: **GitHub** (code), **Supabase** (sign-in + progres
 ```
 Visitor ──HTTPS──► Vercel (static files + security headers)
    │
-   └──HTTPS──► Supabase Auth (GitHub / Google / email link sign-in)
+   └──HTTPS──► Supabase Auth (email link sign-in; GitHub / Google optional)
                Supabase Postgres (lesson_progress table, Row Level Security)
 ```
 
@@ -58,17 +58,20 @@ Open **Authentication**:
    - **Site URL**: your live address, e.g. `https://ai-engineer-line.vercel.app` (update this later if you add a custom domain).
    - **Redirect URLs**: add `https://ai-engineer-line.vercel.app/auth/callback/` and, for local testing, `http://localhost:4321/auth/callback/`. Only exact URLs you list here can receive sign-in links, which stops attackers redirecting tokens elsewhere.
 2. **Sign In / Providers → Email**: enable it. Keep "Confirm email" on. This gives you magic-link sign-in.
-3. **GitHub** (optional but recommended):
+3. **GitHub** (optional — skip it unless you want a "Continue with GitHub" button):
    - On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App**.
      - Homepage URL: your site URL.
      - Authorization callback URL: the callback shown on Supabase's GitHub provider page (it looks like `https://<project-ref>.supabase.co/auth/v1/callback`).
    - Copy the Client ID and a new Client Secret into Supabase's GitHub provider and enable it.
+   - Add `github` to the `NEXT_PUBLIC_AUTH_PROVIDERS` variable in Vercel (step 3 below) — the button only appears then.
 4. **Google** (optional):
    - In [Google Cloud Console](https://console.cloud.google.com/): **APIs & Services → Credentials → Create OAuth client ID → Web application**.
    - Authorised redirect URI: the same Supabase callback URL.
    - Paste the Client ID and Secret into Supabase's Google provider and enable it.
+   - Set **OAuth consent screen → Publishing status** to *In production*; while it says *Testing*, only test users you list can sign in.
+   - Add `google` to `NEXT_PUBLIC_AUTH_PROVIDERS` (for both: `github,google`).
 5. **Rate Limits**: keep the defaults or lower them (for example, emails per hour). They stop people spamming sign-in emails.
-6. **Emails** (recommended before launch): Supabase's built-in email sender is limited and meant for testing. Add your own SMTP provider (Resend, Postmark, Amazon SES, Brevo) under **Authentication → Emails → SMTP Settings**.
+6. **Emails (required before anyone else can sign in):** Supabase's built-in email sender only delivers to members of your own Supabase team, at about 2 emails an hour — everyone else gets "Email address not authorized". Add your own SMTP provider under **Authentication → Emails → SMTP Settings**. Several providers (for example Resend, Brevo, Amazon SES) have free tiers that cover a small site; you'll need to verify a sending domain with them. Then raise the email rate limit under **Rate Limits** to suit your traffic.
 
 ### Copy your keys
 
@@ -92,9 +95,10 @@ Open **Authentication**:
    | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | your anon / publishable key |
    | `NEXT_PUBLIC_SITE_URL` | `https://<your-project>.vercel.app` |
    | `NEXT_TELEMETRY_DISABLED` | `1` |
+   | `NEXT_PUBLIC_AUTH_PROVIDERS` | Optional: `github`, `google` or `github,google` — only for providers you set up in step 2. Leave it out for email-only sign-in. |
 
 4. Click **Deploy**. In a minute or two you'll have a public URL.
-5. Visit `/account/` on the live site and sign in with each provider you enabled. Mark a lesson complete, sign in on a second browser, and check that the progress appears.
+5. Visit `/account/` on the live site and sign in with the email link and each provider you enabled. Changing any `NEXT_PUBLIC_` variable needs a redeploy (**Deployments → ⋯ → Redeploy**), because these values are built into the pages. Mark a lesson complete, sign in on a second browser, and check that the progress appears.
 
 Every `git push` to `main` now redeploys automatically, and every pull request gets its own preview URL.
 
@@ -140,7 +144,7 @@ No website can honestly promise it "cannot be hacked". This one is built to make
 | Risk | What protects it |
 |---|---|
 | Server takeover | There is no application server; the site is static files on Vercel's CDN |
-| Stolen passwords | No passwords exist; sign-in is GitHub, Google or a one-time email link |
+| Stolen passwords | No passwords exist; sign-in is a one-time email link (GitHub / Google optional) |
 | Reading or changing other people's data | Row Level Security in Postgres, plus a key-format check and a per-user row cap |
 | Cross-site scripting | React escaping, MDX with JavaScript blocked, Mermaid in strict mode, Content-Security-Policy |
 | Clickjacking | `X-Frame-Options: DENY` and `frame-ancestors 'none'` |
