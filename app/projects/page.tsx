@@ -1,13 +1,13 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { projectLabel, projects, type ProjectMeta } from "@/lib/content";
+import { projectLabel, projects, type ProjectMeta, projectHref } from "@/lib/content";
 import { lineOf, type LineId } from "@/lib/curriculum";
 
 export const metadata: Metadata = { title: "Projects", description: "Three beginner starter projects with complete code, and eleven production-ready AI engineering projects with architecture, build steps, evaluation, security and deployment." };
 
 function Card({ p }: { p: ProjectMeta }) {
   return (
-    <Link className="proj panel" href={`/projects/${encodeURIComponent(p.slug)}/`}>
+    <Link className="proj panel" href={projectHref(p.slug)}>
       <div className="ph"><span className="no">{projectLabel(p)}</span><span className="mono">{p.level} · {p.weeks}</span></div>
       <div className="pb">
         <h3>{p.title}</h3><p>{p.tagline}</p>

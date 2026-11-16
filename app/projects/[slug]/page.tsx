@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { projectLabel, projects, readProject } from "@/lib/content";
+import { projectLabel, projects, readProject, projectHref } from "@/lib/content";
 import { renderMDX } from "@/lib/mdx";
 import { lineOf, type LineId } from "@/lib/curriculum";
 import { Toc } from "@/components/Toc";
@@ -48,8 +48,8 @@ export default async function ProjectPage({ params }: Params) {
           </aside>
         </div>
         <nav className="pager" aria-label="Previous and next project">
-          {prev ? <Link className="panel" href={`/projects/${encodeURIComponent(prev.slug)}/`}><span className="mono">← {prev.starter ? "Starter" : "Project"} {projectLabel(prev)}</span><b>{prev.title}</b></Link> : <span />}
-          {next && <Link className="panel next" href={`/projects/${encodeURIComponent(next.slug)}/`}><span className="mono">{next.starter ? "Starter" : "Project"} {projectLabel(next)} →</span><b>{next.title}</b></Link>}
+          {prev ? <Link className="panel" href={projectHref(prev.slug)}><span className="mono">← {prev.starter ? "Starter" : "Project"} {projectLabel(prev)}</span><b>{prev.title}</b></Link> : <span />}
+          {next && <Link className="panel next" href={projectHref(next.slug)}><span className="mono">{next.starter ? "Starter" : "Project"} {projectLabel(next)} →</span><b>{next.title}</b></Link>}
         </nav>
       </div>
     </div>

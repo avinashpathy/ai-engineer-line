@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { stationById, lineOf } from "@/lib/curriculum";
-import { lessonExists } from "@/lib/content";
+import { lessonExists, projectHref } from "@/lib/content";
 import { PHASES } from "@/lib/roadmap";
 import { projectLabel, projects } from "@/lib/content";
 
@@ -40,8 +40,8 @@ export default function Roadmap() {
               <p>{ph.goal}</p>
               <div className="tags">{ph.stations.map(s => <Link key={s} className="tag" href={`/learn/${s}/`}>{stationById(s)!.title}</Link>)}</div>
               {(() => { const n = ph.stations.filter(s => lessonExists(s, "deep-dive")).length; return n > 0 ? <p className="mono" style={{ margin: "8px 0 0" }}>First time? Skip the {n} deep dive{n > 1 ? "s" : ""} in this phase and come back later.</p> : null; })()}
-              <div className="build"><b>Build</b>{ph.starter && projs[ph.starter] && <>New to AI? Start with <Link href={`/projects/${encodeURIComponent(ph.starter)}/`} style={{ color: "var(--board-text)" }}>Starter {projectLabel(projs[ph.starter])}: {projs[ph.starter].title}</Link>. </>}{ph.build}
-                {ph.project && projs[ph.project] && <> Then take on <Link href={`/projects/${encodeURIComponent(ph.project)}/`} style={{ color: "var(--board-text)" }}>Project {projectLabel(projs[ph.project])}: {projs[ph.project].title}</Link>.</>}
+              <div className="build"><b>Build</b>{ph.starter && projs[ph.starter] && <>New to AI? Start with <Link href={projectHref(ph.starter)} style={{ color: "var(--board-text)" }}>Starter {projectLabel(projs[ph.starter])}: {projs[ph.starter].title}</Link>. </>}{ph.build}
+                {ph.project && projs[ph.project] && <> Then take on <Link href={projectHref(ph.project)} style={{ color: "var(--board-text)" }}>Project {projectLabel(projs[ph.project])}: {projs[ph.project].title}</Link>.</>}
               </div>
             </div>
           </div>

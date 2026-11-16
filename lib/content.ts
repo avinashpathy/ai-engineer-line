@@ -52,6 +52,10 @@ export interface ProjectMeta {
   lines: string[]; stack: string[]; skills: string[];
   code?: string; starter?: boolean;   // starter projects show "S1" instead of a number
 }
+/** The URL of a project page. Only simple lowercase slugs are allowed into a link. */
+export function projectHref(slug: string): string {
+  return /^[a-z0-9-]+$/.test(slug) ? `/projects/${slug}/` : "/projects/";
+}
 /** "S1" for starter projects, otherwise the zero-padded number: "04". */
 export const projectLabel = (p: { order: number; code?: string }) => p.code ?? String(p.order).padStart(2, "0");
 export function projects(): ProjectMeta[] {
