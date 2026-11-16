@@ -217,6 +217,22 @@ Legend: ✅ taught in a published lesson · 🕒 covered by a station still to b
 | 19 | Input validation with Pydantic | ✅ | [python-backend/python-for-ai](/learn/python-backend/python-for-ai/) |
 | 20 | Logging and monitoring | ✅ | [python-backend/production-backend](/learn/python-backend/production-backend/) |
 
+## Hands-on build briefs
+
+The roadmap also ends each area with a project brief and lists three portfolio projects. Where the site builds each one:
+
+| Roadmap brief | Where it's built |
+|---|---|
+| LLM: command-line chatbot with streaming, JSON mode and a token/cost counter | [llm-apis/core](/learn/llm-apis/core/) — "Build this" |
+| RAG: chat with your PDFs (hybrid search, re-ranking, citations, Recall@5) | [Project 04](/projects/policy-rag/); mini-project M4 in [career-plan/practice](/learn/career-plan/practice/) |
+| Agents: research agent with a plan, step limit, memory and your own MCP server | [Project 09](/projects/research-agent/) with [Project 08](/projects/openapi-mcp-server/) |
+| Evals: 50 golden questions, LLM judge, Langfuse tracing, CI check | [Project 04](/projects/policy-rag/); CI gate in [Project 07](/projects/sales-data-analyst/) |
+| AI system design: gateway with routing, fallback, semantic cache, per-user budgets, latency and cost dashboard | [Project 11 · AI Gateway](/projects/ai-gateway/) |
+| AI security: red-team your own agent, add guardrails, test again | Mini-project M11 in [career-plan/practice](/learn/career-plan/practice/) |
+| Deployment: Docker, GitHub Actions, eval gate, health check, versioned prompts, one-step rollback | [Project 04](/projects/policy-rag/) — step 10 "Ship it" |
+| Backend: FastAPI with JWT, Postgres, Redis, background worker, rate limiting, SSE | [full-stack-apps/core](/learn/full-stack-apps/core/) |
+| Portfolio: docs assistant · agent that does a real job · AI gateway | [Project 04](/projects/policy-rag/) · [Projects 07](/projects/sales-data-analyst/) and [09](/projects/research-agent/) · [Project 11](/projects/ai-gateway/) |
+
 ## Keeping this up to date
 
 When a station is published, change its rows from 🕒 to ✅ and link the lesson. When a gap is written, do the same. Review this file before every content pull request.

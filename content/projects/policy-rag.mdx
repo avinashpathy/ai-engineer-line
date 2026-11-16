@@ -194,6 +194,79 @@ def chat(q: Q, user = Depends(current_user)):       # current_user validates a r
 Don't ship a hard-coded token-to-group map. Groups must come from your identity provider (Entra ID, Okta, Google Workspace) via a verified token, or anyone who guesses a token gets HR's documents.
 </Pitfall>
 
+### 10. Ship it: Docker, health checks, versioned prompts and one-step rollback
+
+Make the assistant deployable and reversible.
+
+**Containerise.** A multi-stage, non-root image for the API and a `docker-compose.yml` with `api`, `qdrant` and `redis` ([Docker done right](/learn/deployment-cicd/core/)).
+
+**Health checks.** `/health` (is the process alive — cheap, no dependencies) and `/ready` (Qdrant reachable, embedding and re-ranker models loaded). The platform restarts on the first and stops sending traffic on the second ([meaningful health checks](/learn/deployment-cicd/deep-dive/)).
+
+**Versioned prompts.** Prompts live in files, and the version in use is configuration, not code:
+
+```text title="prompts/"
+prompts/
+├── answer/v1.md
+├── answer/v2.md          # adds the "couldn't find" rule
+├── rewrite/v1.md
+└── release.yaml          # which versions are live
+```
+
+```yaml title="prompts/release.yaml"
+answer: v2
+rewrite: v1
+canary: { answer: v3, percent: 10 }     # optional: 10% of users try v3
+```
+
+```python title="app/prompts.py"
+import hashlib, pathlib, yaml
+
+ROOT = pathlib.Path("prompts")
+RELEASE = yaml.safe_load((ROOT / "release.yaml").read_text())
+
+def prompt_version(name: str, user_id: str) -> str:
+    c = RELEASE.get("canary", {})
+    if name in c and int(hashlib.sha256(f"{name}:{user_id}".encode()).hexdigest(), 16) % 100 < c["percent"]:
+        return c[name]
+    return RELEASE[name]
+
+def load_prompt(name: str, user_id: str) -> tuple[str, str]:
+    v = prompt_version(name, user_id)
+    return (ROOT / name / f"{v}.md").read_text(), v       # log the version with every request
+```
+
+**The pipeline.** On every pull request: unit tests → the 60-question eval with the faithfulness gate → build. On merge to `main`: build the image tagged with the commit SHA, deploy it as a new revision, smoke-test `/ready` and five golden questions against it, then shift traffic.
+
+```yaml title=".github/workflows/deploy.yml"
+name: deploy
+on: { push: { branches: [main] } }
+permissions: { contents: read, id-token: write }    # OIDC to the cloud: no long-lived keys
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -r requirements.txt && python -m evals.run --suite golden --min-faithfulness 0.90
+        env: { LLM_API_KEY: "${{ secrets.LLM_API_KEY }}" }
+  deploy:
+    needs: eval-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/deploy.sh "${{ github.sha }}"     # build, push, deploy a new revision, smoke-test, shift traffic
+```
+
+**One-step rollback.** Because every release is an immutable image plus a prompt release file, going back is a single command:
+
+| What broke | One step back |
+|---|---|
+| Code (Cloud Run) | `gcloud run services update-traffic policy-api --to-revisions=<previous-revision>=100` |
+| Code (Azure Container Apps) | `az containerapp ingress traffic set -n policy-api -g rg --revision-weight <previous-revision>=100` |
+| Code (Kubernetes) | `kubectl rollout undo deploy/policy-api` |
+| A prompt | Revert `prompts/release.yaml` to the previous version (or set the canary percent to 0) and redeploy the config |
+
+Write these into `RUNBOOK.md`, and **practise a rollback once** before you need it. Record the release (image SHA, prompt versions, eval scores) in the README's change log.
+
 ## Evaluation plan
 
 - Retrieval: hit@k and MRR on 40 answerable questions.
